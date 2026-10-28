@@ -1,0 +1,5 @@
+python-dotenv>=1.0,<2
+requests>=2.32,<3
+truststore>=0.10,<1
+pynspd==1.1.15
+

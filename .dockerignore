@@ -1,0 +1,17 @@
+.env
+.git
+.gitignore
+.pytest_cache
+.pytest_tmp_*
+**/__pycache__
+**/*.py[cod]
+*.log
+logs/
+data/
+tmp/
+temp/
+.venv/
+venv/
+tests/
+experiments/
+docs/
