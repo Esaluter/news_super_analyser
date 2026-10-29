@@ -14,6 +14,7 @@ from typing import IO
 from .ai_analysis import AiAnalysisProcessor
 from .cadastral_enrichment import (
     MAX_OBJECT_BATCH_SIZE,
+    CadastralLimits,
     CadastralEnrichmentProcessor,
     PynspdCadastralSearcher,
 )
@@ -97,6 +98,7 @@ def build_service(
     *,
     logger: logging.Logger,
     stop_event: threading.Event,
+    cadastral_limits: CadastralLimits,
 ) -> MonitoringService:
     gateway = AppsScriptGateway(
         settings.base.apps_script_url,
@@ -124,7 +126,15 @@ def build_service(
             gateway, GigaChatClient(giga_settings), logger=logger
         ).run(limit=MAX_AI_BATCH_SIZE),
         cadastral=lambda: CadastralEnrichmentProcessor(
-            gateway, PynspdCadastralSearcher(), logger=logger
+            gateway,
+            PynspdCadastralSearcher(
+                timeout=cadastral_limits.http_timeout_seconds
+            ),
+            logger=logger,
+            attempts=cadastral_limits.attempts,
+            request_delay=cadastral_limits.request_delay_seconds,
+            row_timeout_seconds=cadastral_limits.row_timeout_seconds,
+            stage_timeout_seconds=cadastral_limits.stage_timeout_seconds,
         ).run(MAX_OBJECT_BATCH_SIZE, apply=True),
         logger=logger,
     )
@@ -151,7 +161,8 @@ def main() -> int:
     try:
         settings = MonitoringSettings.from_env()
         giga_settings = GigaChatSettings.from_env()
-    except (ConfigurationError, GigaChatError) as exc:
+        cadastral_limits = CadastralLimits.from_env()
+    except (ConfigurationError, GigaChatError, ValueError) as exc:
         print(f"Ошибка конфигурации: {exc}", file=sys.stderr)
         return 2
 
@@ -178,7 +189,12 @@ def main() -> int:
         logger.error("TG-09: другой экземпляр сервиса уже запущен")
         return 1
     try:
-        service = build_service(settings, logger=logger, stop_event=stop_event)
+        service = build_service(
+            settings,
+            logger=logger,
+            stop_event=stop_event,
+            cadastral_limits=cadastral_limits,
+        )
         return service.run()
     except Exception as exc:
         logger.warning("TG-09: запуск не выполнен: %s", type(exc).__name__)

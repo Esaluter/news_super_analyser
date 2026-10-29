@@ -201,6 +201,24 @@ def test_gigachat_error_is_recorded_without_objects(tmp_path):
     assert gateway.object_rows == []
 
 
+def test_final_analysis_logs_sanitized_item_error(tmp_path, caplog):
+    gateway = Gateway([candidate()])
+    subject = processor(
+        tmp_path,
+        gateway,
+        Client(error=GigaChatError("timeout token=hidden https://internal/path")),
+    )
+
+    with caplog.at_level("WARNING"):
+        result = subject.run()[0]
+
+    assert result.status == "error"
+    assert result.record_key in caplog.text
+    assert "причина=timeout" in caplog.text
+    assert "hidden" not in caplog.text
+    assert "https://internal" not in caplog.text
+
+
 def test_no_ready_model_answers_does_not_call_model(tmp_path):
     gateway = Gateway([candidate("")])
     client = Client()

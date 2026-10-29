@@ -3,6 +3,7 @@ from __future__ import annotations
 from news_super_analyser.cadastral_enrichment import (
     OBJECT_GEMINI_PROMPT,
     CadastralEnrichmentProcessor,
+    NspdDeadlineExceeded,
     build_object_gemini_formula,
     build_search_variants,
     cadastral_quarter,
@@ -324,6 +325,105 @@ def test_known_j_derives_quarter_without_address_search():
 
     assert gateway.updates[0]["values"] == {"cadastral_quarter": "31:16:0101001"}
     assert searcher.calls == []
+
+
+def test_known_j_fills_quarter_and_all_numbers_without_nspd():
+    gateway = Gateway(
+        [row(cadastral_number="31:16:0101001:25", cadastral_quarter="", all_cadastral="")]
+    )
+    searcher = Searcher()
+
+    stats = processor(gateway, searcher).run(1, apply=True)
+
+    assert gateway.updates[0]["values"] == {
+        "cadastral_quarter": "31:16:0101001",
+        "all_cadastral": "31:16:0101001:25",
+    }
+    assert searcher.calls == []
+    assert stats.existing_numbers == 1
+    assert stats.cadastral_numbers_found == 0
+
+
+class Clock:
+    def __init__(self):
+        self.value = 0.0
+
+    def __call__(self):
+        return self.value
+
+    def sleep(self, seconds):
+        self.value += seconds
+
+
+def test_row_deadline_stops_slow_empty_cascade():
+    clock = Clock()
+
+    class SlowEmptySearcher:
+        def __init__(self):
+            self.calls = 0
+
+        def search(self, _query, *, timeout_seconds, timeout_reason, **_kwargs):
+            self.calls += 1
+            elapsed = min(10.0, timeout_seconds)
+            clock.sleep(elapsed)
+            if timeout_seconds <= 10.0:
+                raise NspdDeadlineExceeded(timeout_reason)
+            return []
+
+    searcher = SlowEmptySearcher()
+    target = row(
+        region="Москва",
+        locality="Москва",
+        address="Профсоюзная улица, дом 123А, строение 15",
+    )
+    worker = CadastralEnrichmentProcessor(
+        Gateway([target]),
+        searcher,
+        attempts=1,
+        request_delay=1,
+        row_timeout_seconds=25,
+        stage_timeout_seconds=60,
+        sleep=clock.sleep,
+        monotonic=clock,
+    )
+
+    stats = worker.run(1)
+
+    assert clock.value == 25
+    assert searcher.calls == 3
+    assert stats.timed_out_rows == 1
+    assert stats.search_diagnostics[0].outcome == "row_timeout"
+
+
+def test_stage_deadline_defers_remaining_rows_and_bounds_elapsed_time():
+    clock = Clock()
+
+    class SlowFailingSearcher:
+        def search(self, _query, *, timeout_seconds, timeout_reason, **_kwargs):
+            elapsed = min(10.0, timeout_seconds)
+            clock.sleep(elapsed)
+            raise NspdDeadlineExceeded(
+                timeout_reason if timeout_seconds <= 10.0 else "request_timeout"
+            )
+
+    worker = CadastralEnrichmentProcessor(
+        Gateway([row(), row(row_number=3), row(row_number=4)]),
+        SlowFailingSearcher(),
+        attempts=2,
+        request_delay=1,
+        row_timeout_seconds=20,
+        stage_timeout_seconds=25,
+        sleep=clock.sleep,
+        monotonic=clock,
+    )
+
+    stats = worker.run(3)
+
+    assert clock.value <= 25
+    assert stats.checked == 2
+    assert stats.timed_out_rows == 2
+    assert stats.deferred_rows == 1
+    assert stats.errors == 3
 
 
 def test_filter_requires_region_locality_street_house_and_qualifier():

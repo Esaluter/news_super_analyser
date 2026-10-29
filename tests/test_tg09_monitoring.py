@@ -229,3 +229,16 @@ def test_disabled_notification_is_supported():
         FakePipeline([report()]), notifier=None, manual_run=True, interval_minutes=60
     )
     assert service.run() == 0
+
+
+def test_cadastral_timeout_still_produces_one_partial_telegram_report():
+    pipe, _ = pipeline(cadastral=Result(errors=2))
+    notifier = FakeNotifier()
+    service = MonitoringService(
+        pipe, notifier=notifier, manual_run=True, interval_minutes=60
+    )
+
+    assert service.run() == 1
+    assert len(notifier.reports) == 1
+    assert notifier.reports[0].errors == 2
+    assert notifier.reports[0].safe_error_summary == "кадастровое обогащение"

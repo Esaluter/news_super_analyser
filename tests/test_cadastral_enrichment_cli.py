@@ -44,7 +44,9 @@ def test_dry_run_never_enables_apply(monkeypatch, tmp_path):
         cadastral_enrichment_cli, "AppsScriptGateway", lambda *_args, **_kwargs: object()
     )
     monkeypatch.setattr(
-        cadastral_enrichment_cli, "PynspdCadastralSearcher", lambda: object()
+        cadastral_enrichment_cli,
+        "PynspdCadastralSearcher",
+        lambda **_kwargs: object(),
     )
     monkeypatch.setattr(
         cadastral_enrichment_cli, "CadastralEnrichmentProcessor", FakeProcessor

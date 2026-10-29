@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
+import subprocess
+import sys
 import time
 from collections import Counter
 from dataclasses import dataclass, field
@@ -40,8 +43,59 @@ class ObjectEnrichmentGateway(Protocol):
 
 class CadastralSearcher(Protocol):
     def search(
-        self, query: str, *, region: str, locality: str, address: str
+        self,
+        query: str,
+        *,
+        region: str,
+        locality: str,
+        address: str,
+        timeout_seconds: float | None = None,
+        timeout_reason: str = "request_timeout",
     ) -> list[dict[str, str]]: ...
+
+
+class NspdDeadlineExceeded(TimeoutError):
+    """A hard wall-clock NSPD deadline expired."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+class NspdWorkerError(ConnectionError):
+    """A sanitized failure returned by the isolated NSPD worker."""
+
+    def __init__(self, error_type: str) -> None:
+        self.error_type = re.sub(r"[^0-9A-Za-z_.-]", "", error_type)[:100]
+        super().__init__(self.error_type or "worker_error")
+
+
+@dataclass(frozen=True)
+class CadastralLimits:
+    http_timeout_seconds: float = 10.0
+    row_timeout_seconds: float = 30.0
+    stage_timeout_seconds: float = 120.0
+    attempts: int = 2
+    request_delay_seconds: float = 1.0
+
+    @classmethod
+    def from_env(cls) -> "CadastralLimits":
+        limits = cls(
+            http_timeout_seconds=_positive_float_env("NSPD_CLIENT_TIMEOUT", 10.0),
+            row_timeout_seconds=_positive_float_env("NSPD_ROW_TIMEOUT_SECONDS", 30.0),
+            stage_timeout_seconds=_positive_float_env(
+                "NSPD_STAGE_TIMEOUT_SECONDS", 120.0
+            ),
+            attempts=_bounded_int_env("NSPD_ATTEMPTS", 2, minimum=1, maximum=3),
+            request_delay_seconds=_nonnegative_float_env(
+                "NSPD_REQUEST_DELAY_SECONDS", 1.0
+            ),
+        )
+        if limits.http_timeout_seconds > limits.row_timeout_seconds:
+            raise ValueError("NSPD_CLIENT_TIMEOUT must not exceed row timeout")
+        if limits.row_timeout_seconds > limits.stage_timeout_seconds:
+            raise ValueError("NSPD row timeout must not exceed stage timeout")
+        return limits
 
 
 @dataclass
@@ -91,6 +145,10 @@ class EnrichmentStats:
     cells_updated: int = 0
     rows_updated: int = 0
     errors: int = 0
+    deferred_rows: int = 0
+    timed_out_rows: int = 0
+    existing_numbers: int = 0
+    successful_rows: int = 0
     row_errors: list[str] = field(default_factory=list)
     planned_rows: list[dict[str, Any]] = field(default_factory=list)
     search_diagnostics: list[RowSearchDiagnostic] = field(default_factory=list)
@@ -405,28 +463,87 @@ def filter_candidates(
 
 
 class PynspdCadastralSearcher:
-    def __init__(self, *, timeout: int | None = None, retries: int | None = None) -> None:
-        self.timeout = timeout if timeout is not None else int(
-            os.getenv("NSPD_CLIENT_TIMEOUT", "20")
-        )
-        self.retries = retries if retries is not None else int(
-            os.getenv("NSPD_CLIENT_RETRIES", "1")
-        )
-        if self.timeout < 1 or self.retries < 0 or self.retries > 3:
-            raise ValueError("invalid NSPD timeout/retry settings")
+    """Run one retry-free, TLS-verified pynspd request in a killable process."""
+
+    def __init__(
+        self,
+        *,
+        timeout: float = 10.0,
+        run: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+    ) -> None:
+        if timeout <= 0:
+            raise ValueError("invalid NSPD timeout setting")
+        self.timeout = float(timeout)
+        self._run = run
 
     def search(
-        self, query: str, *, region: str, locality: str, address: str
+        self,
+        query: str,
+        *,
+        region: str,
+        locality: str,
+        address: str,
+        timeout_seconds: float | None = None,
+        timeout_reason: str = "request_timeout",
     ) -> list[dict[str, str]]:
-        from pynspd import Nspd
-
-        client = Nspd(client_timeout=self.timeout, client_retries=self.retries)
+        del region, locality, address
+        requested_budget = timeout_seconds or self.timeout
+        hard_timeout = min(self.timeout, requested_budget)
+        effective_timeout_reason = (
+            "request_timeout" if self.timeout < requested_budget else timeout_reason
+        )
+        if hard_timeout <= 0:
+            raise NspdDeadlineExceeded(timeout_reason)
+        worker_input = json.dumps(
+            {"query": query, "timeout_seconds": hard_timeout}, ensure_ascii=False
+        )
+        worker_env = dict(os.environ)
+        for name in tuple(worker_env):
+            upper = name.upper()
+            if upper.startswith("PYNSPD_") or any(
+                marker in upper
+                for marker in ("SECRET", "TOKEN", "AUTH_KEY", "PASSWORD")
+            ):
+                worker_env.pop(name, None)
         try:
-            return extract_candidates(client.search(query))
-        finally:
-            close = getattr(client, "close", None)
-            if callable(close):
-                close()
+            completed = self._run(
+                [sys.executable, "-m", "news_super_analyser.nspd_worker"],
+                input=worker_input,
+                text=True,
+                capture_output=True,
+                timeout=hard_timeout,
+                check=False,
+                env=worker_env,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise NspdDeadlineExceeded(effective_timeout_reason) from exc
+        if completed.returncode != 0:
+            raise NspdWorkerError("worker_exit")
+        try:
+            payload = json.loads(completed.stdout)
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise NspdWorkerError("invalid_worker_response") from exc
+        if not isinstance(payload, dict) or payload.get("ok") is not True:
+            error_type = (
+                str(payload.get("error_type", "worker_error"))[:100]
+                if isinstance(payload, dict)
+                else "worker_error"
+            )
+            raise NspdWorkerError(error_type)
+        candidates = payload.get("candidates")
+        if not isinstance(candidates, list) or not all(
+            isinstance(item, dict) for item in candidates
+        ):
+            raise NspdWorkerError("invalid_worker_candidates")
+        return [
+            {
+                "cadastral_number": str(item.get("cadastral_number", "")),
+                "address": str(item.get("address", "")),
+                "category": str(item.get("category", "")),
+                "category_name": str(item.get("category_name", "")),
+            }
+            for item in candidates
+        ]
 
 
 class CadastralEnrichmentProcessor:
@@ -438,18 +555,30 @@ class CadastralEnrichmentProcessor:
         logger: logging.Logger | None = None,
         attempts: int = 2,
         request_delay: float = 1.0,
+        row_timeout_seconds: float = 30.0,
+        stage_timeout_seconds: float = 120.0,
         rejection_diagnostics: bool = False,
         sleep: Callable[[float], None] = time.sleep,
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
-        if attempts < 1 or request_delay < 0:
+        if (
+            attempts < 1
+            or request_delay < 0
+            or row_timeout_seconds <= 0
+            or stage_timeout_seconds <= 0
+            or row_timeout_seconds > stage_timeout_seconds
+        ):
             raise ValueError("invalid retry/delay settings")
         self.gateway = gateway
         self.searcher = searcher
         self.logger = logger or logging.getLogger(__name__)
         self.attempts = attempts
         self.request_delay = request_delay
+        self.row_timeout_seconds = row_timeout_seconds
+        self.stage_timeout_seconds = stage_timeout_seconds
         self.rejection_diagnostics = rejection_diagnostics
         self.sleep = sleep
+        self.monotonic = monotonic
 
     def run(
         self,
@@ -458,22 +587,57 @@ class CadastralEnrichmentProcessor:
         row_number: int | None = None,
         apply: bool = False,
     ) -> EnrichmentStats:
+        stage_started = self.monotonic()
+        stage_deadline = stage_started + self.stage_timeout_seconds
+        self.logger.info(
+            "TG-08.1 начат; HTTP timeout=%.1fс лимит строки=%.1fс "
+            "лимит этапа=%.1fс попыток=%d внутренних повторов=0 задержка=%.1fс",
+            float(getattr(self.searcher, "timeout", 0.0) or 0.0),
+            self.row_timeout_seconds,
+            self.stage_timeout_seconds,
+            self.attempts,
+            self.request_delay,
+        )
         candidates = self.gateway.read_object_enrichment_candidates(
             limit, row_number=row_number
         )
         stats = EnrichmentStats()
         for index, row in enumerate(candidates):
+            if self.monotonic() >= stage_deadline:
+                deferred = len(candidates) - index
+                stats.deferred_rows += deferred
+                stats.errors += deferred
+                stats.row_errors.append(
+                    f"лимит кадастрового этапа: отложено строк {deferred}"
+                )
+                self.logger.warning(
+                    "TG-08.1 лимит этапа исчерпан; отложено строк=%d", deferred
+                )
+                break
             stats.checked += 1
+            row_started = self.monotonic()
+            row_deadline = min(
+                stage_deadline, row_started + self.row_timeout_seconds
+            )
             try:
-                values, prepare_gemini, found, diagnostic, search_error = self._plan(row)
+                values, prepare_gemini, found, diagnostic, search_error = self._plan(
+                    row,
+                    row_deadline=row_deadline,
+                    stage_deadline=stage_deadline,
+                )
                 stats.search_diagnostics.append(diagnostic)
                 stats.nspd_queries += sum(item.requests for item in diagnostic.attempts)
                 stats.cadastral_numbers_found += found
+                stats.existing_numbers += bool(
+                    normalize_cadastral_number(row.get("cadastral_number"))
+                )
                 if search_error:
                     stats.errors += 1
+                    if diagnostic.outcome in {"row_timeout", "stage_timeout"}:
+                        stats.timed_out_rows += 1
                     stats.row_errors.append(
                         f"строка {row.get('row_number', '?')}: "
-                        f"{diagnostic.attempts[-1].status}"
+                        f"{diagnostic.outcome}"
                     )
                 stats.cells_planned += len(values) + int(prepare_gemini)
                 if values or prepare_gemini:
@@ -487,21 +651,33 @@ class CadastralEnrichmentProcessor:
                         )
                     stats.planned_rows.append(plan)
                 if apply and (values or prepare_gemini):
-                    result = self.gateway.update_object_enrichment(
-                        analysis_id=str(row["analysis_id"]),
-                        object_number=str(row["object_number"]),
-                        values=values,
-                        prepare_gemini=prepare_gemini,
-                    )
-                    updated = result.get("updated_fields", [])
-                    stats.cells_updated += len(updated)
-                    stats.rows_updated += bool(updated)
+                    if self.monotonic() >= stage_deadline:
+                        stats.deferred_rows += 1
+                        self.logger.warning(
+                            "TG-08.1 строка=%s отложена: лимит этапа исчерпан "
+                            "до записи",
+                            row.get("row_number", "?"),
+                        )
+                    else:
+                        result = self.gateway.update_object_enrichment(
+                            analysis_id=str(row["analysis_id"]),
+                            object_number=str(row["object_number"]),
+                            values=values,
+                            prepare_gemini=prepare_gemini,
+                        )
+                        updated = result.get("updated_fields", [])
+                        stats.cells_updated += len(updated)
+                        stats.rows_updated += bool(updated)
+                if not search_error:
+                    stats.successful_rows += 1
                 self.logger.info(
-                    "TG-08.1 строка=%s outcome=%s запросов=%d найдено=%d",
+                    "TG-08.1 строка=%s outcome=%s HTTP-попыток=%d найдено=%d "
+                    "время=%.2fс",
                     diagnostic.row_number,
                     diagnostic.outcome,
                     sum(item.requests for item in diagnostic.attempts),
                     diagnostic.matching_numbers,
+                    self.monotonic() - row_started,
                 )
             except Exception as exc:
                 stats.errors += 1
@@ -509,11 +685,31 @@ class CadastralEnrichmentProcessor:
                 stats.row_errors.append(label)
                 self.logger.exception("Ошибка TG-08.1 для %s", label)
             if self.request_delay and index + 1 < len(candidates):
-                self.sleep(self.request_delay)
+                remaining = stage_deadline - self.monotonic()
+                if remaining > 0:
+                    self.sleep(min(self.request_delay, remaining))
+        self.logger.info(
+            "TG-08.1 завершён; время=%.2fс проверено=%d HTTP-попыток=%d "
+            "успешно=%d найдено=%d уже было=%d ошибок=%d тайм-аутов=%d "
+            "отложено=%d",
+            self.monotonic() - stage_started,
+            stats.checked,
+            stats.nspd_queries,
+            stats.successful_rows,
+            stats.cadastral_numbers_found,
+            stats.existing_numbers,
+            stats.errors,
+            stats.timed_out_rows,
+            stats.deferred_rows,
+        )
         return stats
 
     def _plan(
-        self, row: dict[str, Any]
+        self,
+        row: dict[str, Any],
+        *,
+        row_deadline: float,
+        stage_deadline: float,
     ) -> tuple[dict[str, str], bool, int, RowSearchDiagnostic, bool]:
         values: dict[str, str] = {}
         current_j = str(row.get("cadastral_number", ""))
@@ -525,12 +721,16 @@ class CadastralEnrichmentProcessor:
         region = str(row.get("region", "")).strip()
         diagnostic = RowSearchDiagnostic(row_number=row.get("row_number", "?"))
 
-        if not current_o and normalize_cadastral_number(current_j):
-            values["cadastral_quarter"] = cadastral_quarter(current_j)
+        known_number = normalize_cadastral_number(current_j)
+        if not current_o and known_number:
+            values["cadastral_quarter"] = cadastral_quarter(known_number)
+        if not current_p and known_number:
+            values["all_cadastral"] = known_number
 
         needs_search = bool(
             locality
             and address
+            and not known_number
             and any(not value for value in (current_j, current_o, current_p))
             and is_specific_address(address)
         )
@@ -542,6 +742,8 @@ class CadastralEnrichmentProcessor:
                 region=region,
                 locality=locality,
                 address=address,
+                row_deadline=row_deadline,
+                stage_deadline=stage_deadline,
             )
 
         numbers = sorted(
@@ -581,6 +783,8 @@ class CadastralEnrichmentProcessor:
         region: str,
         locality: str,
         address: str,
+        row_deadline: float,
+        stage_deadline: float,
     ) -> tuple[list[dict[str, str]], RowSearchDiagnostic, bool]:
         diagnostic = RowSearchDiagnostic(row_number=row_number, outcome="not_found")
         remaining_samples = 5 if self.rejection_diagnostics else 0
@@ -589,7 +793,12 @@ class CadastralEnrichmentProcessor:
         )
         for index, (level, query) in enumerate(variants):
             raw, requests_count, error = self._search_with_retry(
-                query, region=region, locality=locality, address=address
+                query,
+                region=region,
+                locality=locality,
+                address=address,
+                row_deadline=row_deadline,
+                stage_deadline=stage_deadline,
             )
             if error is not None:
                 status = _search_error_status(error)
@@ -602,7 +811,7 @@ class CadastralEnrichmentProcessor:
                         accepted=0,
                         rejected=0,
                         status=status,
-                        error_type=type(error).__name__,
+                        error_type=_network_error_type(error),
                     )
                 )
                 diagnostic.outcome = status
@@ -634,32 +843,92 @@ class CadastralEnrichmentProcessor:
                 diagnostic.outcome = "matched"
                 return accepted, diagnostic, False
             if self.request_delay and index + 1 < len(variants):
-                self.sleep(self.request_delay)
+                remaining, _ = self._remaining_budget(
+                    row_deadline=row_deadline, stage_deadline=stage_deadline
+                )
+                if remaining <= 0:
+                    diagnostic.outcome = self._deadline_reason(
+                        row_deadline=row_deadline, stage_deadline=stage_deadline
+                    )
+                    return [], diagnostic, True
+                self.sleep(min(self.request_delay, remaining))
         return [], diagnostic, False
 
     def _search_with_retry(
-        self, query: str, *, region: str, locality: str, address: str
+        self,
+        query: str,
+        *,
+        region: str,
+        locality: str,
+        address: str,
+        row_deadline: float,
+        stage_deadline: float,
     ) -> tuple[list[dict[str, str]], int, Exception | None]:
         for attempt in range(1, self.attempts + 1):
+            remaining, deadline_reason = self._remaining_budget(
+                row_deadline=row_deadline, stage_deadline=stage_deadline
+            )
+            if remaining <= 0:
+                return [], attempt - 1, NspdDeadlineExceeded(deadline_reason)
             try:
                 return (
                     self.searcher.search(
-                        query, region=region, locality=locality, address=address
+                        query,
+                        region=region,
+                        locality=locality,
+                        address=address,
+                        timeout_seconds=remaining,
+                        timeout_reason=deadline_reason,
                     ),
                     attempt,
                     None,
                 )
             except Exception as exc:
+                if isinstance(exc, NspdDeadlineExceeded) and exc.reason in {
+                    "row_timeout",
+                    "stage_timeout",
+                }:
+                    return [], attempt, exc
                 if attempt == self.attempts:
                     return [], attempt, exc
                 self.logger.warning(
-                    "NSPD не ответила, повтор %d/%d", attempt + 1, self.attempts
+                    "NSPD не ответила; тип=%s HTTP-попытка=%d/%d",
+                    _network_error_type(exc),
+                    attempt,
+                    self.attempts,
                 )
-                self.sleep(min(2.0, max(0.1, self.request_delay)))
+                remaining, _ = self._remaining_budget(
+                    row_deadline=row_deadline, stage_deadline=stage_deadline
+                )
+                if remaining <= 0:
+                    continue
+                self.sleep(
+                    min(remaining, min(2.0, max(0.1, self.request_delay)))
+                )
         raise AssertionError("unreachable")
+
+    def _remaining_budget(
+        self, *, row_deadline: float, stage_deadline: float
+    ) -> tuple[float, str]:
+        now = self.monotonic()
+        row_remaining = row_deadline - now
+        stage_remaining = stage_deadline - now
+        reason = "stage_timeout" if stage_remaining <= row_remaining else "row_timeout"
+        return min(row_remaining, stage_remaining), reason
+
+    def _deadline_reason(
+        self, *, row_deadline: float, stage_deadline: float
+    ) -> str:
+        return self._remaining_budget(
+            row_deadline=row_deadline, stage_deadline=stage_deadline
+        )[1]
 
 
 def _search_error_status(error: Exception) -> str:
+    if isinstance(error, NspdDeadlineExceeded):
+        return error.reason
+    if isinstance(error, NspdWorkerError):
+        return "nspd_unavailable"
     marker = f"{type(error).__name__} {error}".lower()
     if any(
         word in marker
@@ -667,3 +936,39 @@ def _search_error_status(error: Exception) -> str:
     ):
         return "nspd_unavailable"
     return "response_error"
+
+
+def _network_error_type(error: Exception) -> str:
+    if isinstance(error, NspdWorkerError):
+        return error.error_type or type(error).__name__
+    return type(error).__name__
+
+
+def _positive_float_env(name: str, default: float) -> float:
+    try:
+        value = float(os.getenv(name, str(default)))
+    except ValueError as exc:
+        raise ValueError(f"{name} must be numeric") from exc
+    if value <= 0:
+        raise ValueError(f"{name} must be positive")
+    return value
+
+
+def _nonnegative_float_env(name: str, default: float) -> float:
+    try:
+        value = float(os.getenv(name, str(default)))
+    except ValueError as exc:
+        raise ValueError(f"{name} must be numeric") from exc
+    if value < 0:
+        raise ValueError(f"{name} must not be negative")
+    return value
+
+
+def _bounded_int_env(name: str, default: int, *, minimum: int, maximum: int) -> int:
+    try:
+        value = int(os.getenv(name, str(default)))
+    except ValueError as exc:
+        raise ValueError(f"{name} must be an integer") from exc
+    if not minimum <= value <= maximum:
+        raise ValueError(f"{name} must be between {minimum} and {maximum}")
+    return value

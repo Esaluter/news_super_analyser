@@ -153,12 +153,19 @@ class AiAnalysisProcessor:
     def run(
         self, *, limit: int = 1, record_key: str | None = None
     ) -> list[ItemResult]:
-        return [
-            self.process(candidate)
-            for candidate in self.select(
-                limit=limit, record_key=record_key, claim=True
-            )
-        ]
+        results: list[ItemResult] = []
+        for candidate in self.select(limit=limit, record_key=record_key, claim=True):
+            result = self.process(candidate)
+            results.append(result)
+            if result.status != "success":
+                self.logger.warning(
+                    "Финальный анализ не выполнен; record_key=%s analysis_id=%s "
+                    "причина=%s",
+                    _safe_identifier(result.record_key),
+                    _safe_identifier(result.analysis_id),
+                    _safe_log_diagnostic(result.error),
+                )
+        return results
 
     def process(self, candidate: dict[str, str]) -> ItemResult:
         try:
@@ -401,6 +408,27 @@ def _news_link(links: str) -> str:
 def _safe_error(exc: Exception) -> str:
     message = str(exc).strip() or type(exc).__name__
     return message[:500]
+
+
+def _safe_identifier(value: str) -> str:
+    cleaned = re.sub(r"[^0-9A-Za-z:._-]", "", str(value or ""))
+    return cleaned[:100] or "-"
+
+
+def _safe_log_diagnostic(value: str) -> str:
+    text = " ".join(str(value or "unknown").split())
+    text = re.sub(r"https?://\S+", "[URL]", text, flags=re.I)
+    text = re.sub(
+        r"(?i)\b(?:bearer|basic)\s+[A-Za-z0-9._~+/=:-]+",
+        "[REDACTED]",
+        text,
+    )
+    text = re.sub(
+        r"(?i)(token|key|secret|password|authorization)=\S+",
+        r"\1=[REDACTED]",
+        text,
+    )
+    return text[:300]
 
 
 def _usable_text(value: str) -> bool:
