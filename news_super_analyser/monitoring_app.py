@@ -18,7 +18,7 @@ from .cadastral_enrichment import (
     CadastralEnrichmentProcessor,
     PynspdCadastralSearcher,
 )
-from .config import ConfigurationError, MonitoringSettings
+from .config import ConfigurationError, MonitoringSettings, load_project_environment
 from .full_text_processor import FullTextProcessor
 from .gemini_formula import GeminiFormulaProcessor
 from .giga_text import GigaTextProcessor
@@ -158,6 +158,12 @@ def build_service(
 
 
 def main() -> int:
+    load_project_environment()
+    from .nspd_diagnostics import diagnostic_mode_enabled, run_diagnostics
+
+    if diagnostic_mode_enabled():
+        return run_diagnostics()
+
     try:
         settings = MonitoringSettings.from_env()
         giga_settings = GigaChatSettings.from_env()
