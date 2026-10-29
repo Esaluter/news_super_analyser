@@ -122,7 +122,8 @@ class GigaChatClient:
             )
         except requests.RequestException as exc:
             raise GigaChatError(
-                f"GigaChat chat transport failure: {type(exc).__name__}",
+                "GigaChat chat transport failure: "
+                + _safe_transport_diagnostic(exc),
                 retryable=True,
             ) from exc
         self._require_success(
@@ -168,7 +169,8 @@ class GigaChatClient:
             )
         except requests.RequestException as exc:
             raise GigaChatError(
-                f"GigaChat authentication transport failure: {type(exc).__name__}",
+                "GigaChat authentication transport failure: "
+                + _safe_transport_diagnostic(exc),
                 retryable=True,
             ) from exc
         self._require_success(response, "authentication", url=AUTH_URL)
@@ -252,6 +254,50 @@ def _safe_server_diagnostic(response: Any) -> str:
         if cleaned:
             parts.append(f"{key}={cleaned}")
     return ", ".join(parts)[:500]
+
+
+def _safe_transport_diagnostic(exc: BaseException) -> str:
+    """Expose a short TLS/network root cause without URLs or credentials."""
+    cause = _deepest_exception(exc)
+    text = " ".join(str(cause).split())
+    text = re.sub(
+        r"(?i)\b(?:bearer|basic)\s+[A-Za-z0-9._~+/=:-]+",
+        "[REDACTED]",
+        text,
+    )
+    text = re.sub(r"https?://\S+", "[URL]", text, flags=re.I)
+    text = re.sub(
+        r"(?i)(token|key|secret|authorization)=\S+",
+        r"\1=[REDACTED]",
+        text,
+    )
+    label = type(exc).__name__
+    cause_label = type(cause).__name__
+    is_tls_failure = "ssl" in label.casefold() or "ssl" in cause_label.casefold()
+    if text and is_tls_failure:
+        return f"{label}; cause={cause_label}: {text[:300]}"
+    if cause is not exc:
+        return f"{label}; cause={cause_label}"
+    return label
+
+
+def _deepest_exception(exc: BaseException) -> BaseException:
+    current = exc
+    seen: set[int] = set()
+    while id(current) not in seen:
+        seen.add(id(current))
+        nested = getattr(current, "reason", None)
+        if not isinstance(nested, BaseException):
+            nested = current.__cause__ or current.__context__
+        if not isinstance(nested, BaseException):
+            nested = next(
+                (item for item in current.args if isinstance(item, BaseException)),
+                None,
+            )
+        if not isinstance(nested, BaseException):
+            break
+        current = nested
+    return current
 
 
 def _response_retry_after(response: Any) -> float | None:

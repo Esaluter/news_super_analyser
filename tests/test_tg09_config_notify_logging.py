@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import logging
 import io
-from datetime import datetime
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 import pytest
 import requests
@@ -72,7 +73,7 @@ def test_telegram_credentials_optional_when_notifications_disabled(monkeypatch):
 
 def sample_report(errors=0):
     return CycleReport(
-        datetime(2026, 10, 28, 14, 30),
+        datetime(2026, 10, 28, 14, 30, tzinfo=ZoneInfo("Asia/Yekaterinburg")),
         new_news=0,
         analyzed_news=1,
         processed_objects=2,
@@ -94,18 +95,33 @@ def test_zero_new_news_report_contains_actual_old_work_and_link():
 
 def test_automatic_report_contains_planned_next_check():
     report = sample_report()
-    report.next_check_at = datetime(2026, 10, 28, 15, 30)
+    report.next_check_at = datetime(
+        2026, 10, 28, 15, 30, tzinfo=ZoneInfo("Asia/Yekaterinburg")
+    )
     message = format_cycle_message(report, "https://example.test/sheet")
     assert "Следующая проверка: <b>28.10.2026, 15:30</b>" in message
 
 
 def test_next_check_can_cross_midnight():
     report = sample_report(1)
-    report.finished_at = datetime(2026, 10, 28, 23, 45)
-    report.next_check_at = datetime(2026, 10, 29, 0, 45)
+    report.finished_at = datetime(
+        2026, 10, 28, 23, 45, tzinfo=ZoneInfo("Asia/Yekaterinburg")
+    )
+    report.next_check_at = datetime(
+        2026, 10, 29, 0, 45, tzinfo=ZoneInfo("Asia/Yekaterinburg")
+    )
     message = format_cycle_message(report, "https://example.test/sheet")
     assert "Следующая проверка: <b>29.10.2026, 00:45</b>" in message
     assert "частично успешно" in message
+
+
+def test_telegram_times_are_converted_from_utc_to_yekaterinburg():
+    report = sample_report()
+    report.finished_at = datetime(2026, 10, 28, 10, 5, tzinfo=timezone.utc)
+    report.next_check_at = datetime(2026, 10, 28, 11, 5, tzinfo=timezone.utc)
+    message = format_cycle_message(report, "https://example.test/sheet")
+    assert "Проверка завершена: 28.10.2026, 15:05" in message
+    assert "Следующая проверка: <b>28.10.2026, 16:05</b>" in message
 
 
 def test_google_sheet_link_is_valid_html_and_dynamic_text_is_escaped():

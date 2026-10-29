@@ -5,11 +5,16 @@ from __future__ import annotations
 import html
 import logging
 import re
+from datetime import datetime
 from typing import Any, Callable
+from zoneinfo import ZoneInfo
 
 import requests
 
 from .pipeline import CycleReport
+
+
+DISPLAY_TIMEZONE = ZoneInfo("Asia/Yekaterinburg")
 
 
 class TelegramNotificationError(RuntimeError):
@@ -32,9 +37,9 @@ class TelegramNotificationError(RuntimeError):
 
 
 def format_cycle_message(report: CycleReport, sheet_url: str) -> str:
-    finished = report.finished_at.strftime("%d.%m.%Y, %H:%M")
+    finished = _display_datetime(report.finished_at).strftime("%d.%m.%Y, %H:%M")
     next_check = (
-        report.next_check_at.strftime("%d.%m.%Y, %H:%M")
+        _display_datetime(report.next_check_at).strftime("%d.%m.%Y, %H:%M")
         if report.next_check_at is not None
         else "не запланирована (ручной режим)"
     )
@@ -56,6 +61,13 @@ def format_cycle_message(report: CycleReport, sheet_url: str) -> str:
         lines.append("Сбои этапов: " + html.escape(report.safe_error_summary))
     lines.extend(("", f'<a href="{html.escape(sheet_url, quote=True)}">📊 Открыть Google Таблицу</a>'))
     return "\n".join(lines)
+
+
+def _display_datetime(value: datetime) -> datetime:
+    """Convert a server-local or timezone-aware value to Yekaterinburg time."""
+    if value.tzinfo is None:
+        value = value.astimezone()
+    return value.astimezone(DISPLAY_TIMEZONE)
 
 
 class TelegramNotifier:

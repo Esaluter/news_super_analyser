@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import ssl
+
 import requests
 import pytest
 
@@ -69,6 +71,46 @@ def test_network_failure_is_sanitized():
         client.complete(system_prompt="system", user_prompt="user")
     assert "sensitive" not in str(caught.value)
     assert caught.value.retryable is True
+
+
+def test_ssl_failure_includes_safe_certificate_verification_root_cause():
+    verification = ssl.SSLCertVerificationError(
+        1,
+        "[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: "
+        "self-signed certificate in certificate chain",
+    )
+
+    def post(*_args, **_kwargs):
+        raise requests.exceptions.SSLError(verification)
+
+    client = GigaChatClient(GigaChatSettings(auth_key="secret"), post=post)
+    with pytest.raises(GigaChatError) as caught:
+        client.complete(system_prompt="system", user_prompt="user")
+    message = str(caught.value)
+    assert "authentication transport failure: SSLError" in message
+    assert "SSLCertVerificationError" in message
+    assert "CERTIFICATE_VERIFY_FAILED" in message
+    assert "self-signed certificate in certificate chain" in message
+    assert "secret" not in message
+
+
+def test_ssl_diagnostic_redacts_url_and_authorization_material():
+    verification = ssl.SSLCertVerificationError(
+        1,
+        "certificate verify failed at https://private.example/path "
+        "Authorization=private-value",
+    )
+
+    def post(*_args, **_kwargs):
+        raise requests.exceptions.SSLError(verification)
+
+    client = GigaChatClient(GigaChatSettings(auth_key="secret"), post=post)
+    with pytest.raises(GigaChatError) as caught:
+        client.complete(system_prompt="system", user_prompt="user")
+    message = str(caught.value)
+    assert "private.example" not in message
+    assert "private-value" not in message
+    assert "[REDACTED]" in message
 
 
 @pytest.mark.parametrize("status", [400, 401, 403, 404, 429, 500])
