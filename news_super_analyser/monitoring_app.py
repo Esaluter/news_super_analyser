@@ -18,7 +18,13 @@ from .cadastral_enrichment import (
     CadastralEnrichmentProcessor,
     PynspdCadastralSearcher,
 )
-from .config import ConfigurationError, MonitoringSettings, load_project_environment
+from .cadastral_queue import CadastralQueueSynchronizer
+from .config import (
+    ConfigurationError,
+    MonitoringSettings,
+    cadastre_mode_from_env,
+    load_project_environment,
+)
 from .full_text_processor import FullTextProcessor
 from .gemini_formula import GeminiFormulaProcessor
 from .giga_text import GigaTextProcessor
@@ -98,7 +104,7 @@ def build_service(
     *,
     logger: logging.Logger,
     stop_event: threading.Event,
-    cadastral_limits: CadastralLimits,
+    cadastral_limits: CadastralLimits | None,
 ) -> MonitoringService:
     gateway = AppsScriptGateway(
         settings.base.apps_script_url,
@@ -107,6 +113,23 @@ def build_service(
         logger=logger,
     )
     giga_settings = GigaChatSettings.from_env()
+    if settings.cadastre_mode == "direct":
+        if cadastral_limits is None:
+            raise ValueError("cadastral limits are required in direct mode")
+        cadastral_stage = lambda: CadastralEnrichmentProcessor(
+            gateway,
+            PynspdCadastralSearcher(
+                timeout=cadastral_limits.http_timeout_seconds
+            ),
+            logger=logger,
+            attempts=cadastral_limits.attempts,
+            request_delay=cadastral_limits.request_delay_seconds,
+            row_timeout_seconds=cadastral_limits.row_timeout_seconds,
+            stage_timeout_seconds=cadastral_limits.stage_timeout_seconds,
+        ).run(MAX_OBJECT_BATCH_SIZE, apply=True)
+    else:
+        cadastral_stage = CadastralQueueSynchronizer(gateway, logger=logger).run
+
     pipeline = MonitoringPipeline(
         sync=Synchronizer(gateway, logger=logger).run,
         full_text=lambda: FullTextProcessor(
@@ -125,17 +148,8 @@ def build_service(
         analysis=lambda: AiAnalysisProcessor(
             gateway, GigaChatClient(giga_settings), logger=logger
         ).run(limit=MAX_AI_BATCH_SIZE),
-        cadastral=lambda: CadastralEnrichmentProcessor(
-            gateway,
-            PynspdCadastralSearcher(
-                timeout=cadastral_limits.http_timeout_seconds
-            ),
-            logger=logger,
-            attempts=cadastral_limits.attempts,
-            request_delay=cadastral_limits.request_delay_seconds,
-            row_timeout_seconds=cadastral_limits.row_timeout_seconds,
-            stage_timeout_seconds=cadastral_limits.stage_timeout_seconds,
-        ).run(MAX_OBJECT_BATCH_SIZE, apply=True),
+        cadastral=cadastral_stage,
+        cadastre_mode=settings.cadastre_mode,
         logger=logger,
     )
     notifier = None
@@ -161,13 +175,29 @@ def main() -> int:
     load_project_environment()
     from .nspd_diagnostics import diagnostic_mode_enabled, run_diagnostics
 
+    try:
+        configured_cadastre_mode = cadastre_mode_from_env()
+    except ConfigurationError as exc:
+        print(f"Ошибка конфигурации: {exc}", file=sys.stderr)
+        return 2
     if diagnostic_mode_enabled():
+        if configured_cadastre_mode != "direct":
+            print(
+                "Ошибка конфигурации: NSPD_DIAGNOSTIC_MODE доступен только при "
+                "CADASTRE_MODE=direct",
+                file=sys.stderr,
+            )
+            return 2
         return run_diagnostics()
 
     try:
         settings = MonitoringSettings.from_env()
         giga_settings = GigaChatSettings.from_env()
-        cadastral_limits = CadastralLimits.from_env()
+        cadastral_limits = (
+            CadastralLimits.from_env()
+            if settings.cadastre_mode == "direct"
+            else None
+        )
     except (ConfigurationError, GigaChatError, ValueError) as exc:
         print(f"Ошибка конфигурации: {exc}", file=sys.stderr)
         return 2
@@ -181,6 +211,7 @@ def main() -> int:
         ),
     )
     stop_event = threading.Event()
+    logger.info("TG-09: выбран кадастровый режим=%s", settings.cadastre_mode)
 
     def request_stop(signum: int, _frame: object) -> None:
         logger.info("TG-09: получен сигнал остановки %s", signum)

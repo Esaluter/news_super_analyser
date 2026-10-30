@@ -51,12 +51,26 @@ def format_cycle_message(report: CycleReport, sheet_url: str) -> str:
         f"📰 Новых новостей: <b>{report.new_news}</b>",
         f"🔍 Проанализировано: <b>{report.analyzed_news}</b>",
         f"🏢 Обработано объектов: <b>{report.processed_objects}</b>",
-        f"📍 Найдено кадастровых номеров: <b>{report.cadastral_numbers_found}</b>",
-        f"⚠️ Ошибок: <b>{report.errors}</b>",
-        f"🕒 Следующая проверка: <b>{html.escape(next_check)}</b>",
-        "",
-        f"<b>Статус: {html.escape(report.status)}</b>",
     ]
+    if report.cadastre_mode == "direct":
+        lines.append(
+            f"📍 Найдено кадастровых номеров: <b>{report.cadastral_numbers_found}</b>"
+        )
+    else:
+        lines.extend(
+            (
+                f"🗂️ Кадастровых записей добавлено: <b>{report.cadastral_records_added}</b>",
+                f"📥 Кадастровых результатов получено: <b>{report.cadastral_results_received}</b>",
+            )
+        )
+    lines.extend(
+        (
+            f"⚠️ Ошибок: <b>{report.errors}</b>",
+            f"🕒 Следующая проверка: <b>{html.escape(next_check)}</b>",
+            "",
+            f"<b>Статус: {html.escape(report.status)}</b>",
+        )
+    )
     if report.errors and report.safe_error_summary:
         lines.append("Сбои этапов: " + html.escape(report.safe_error_summary))
     lines.extend(("", f'<a href="{html.escape(sheet_url, quote=True)}">📊 Открыть Google Таблицу</a>'))

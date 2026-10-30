@@ -83,11 +83,16 @@ const responseHeaders = [
   'ID анализа','Модель','Дата и время запроса','Входной текст',
   'Полный ответ модели','Ошибка'
 ];
+const cadastralHeaders = [
+  'ID объекта','Регион','Населённый пункт','Адрес','Кадастровый номер',
+  'Кадастровый квартал','Все кадастровые номера','Статус','Ошибка','Дата проверки'
+];
 const sourceSheet = new Sheet('ИЖС-КОРП', [sourceHeaders, ['-1:1', '2026-01-01T00:00:00Z']]);
 const targetSheet = new Sheet('НОВОСТИ', [targetHeaders]);
 const analysisSheet = new Sheet('АНАЛИЗ', [analysisHeaders]);
 const objectsSheet = new Sheet('ОБЪЕКТЫ', [objectHeaders]);
 const responsesSheet = new Sheet('ИИ_ОТВЕТЫ', [responseHeaders]);
+const cadastralSheet = new Sheet('КАДАСТРЫ', [cadastralHeaders]);
 const properties = {
   ANALYSER_SECRET: 'secret',
   SOURCE_SPREADSHEET_ID: 'source-id',
@@ -109,7 +114,8 @@ const context = {
       : id === 'target-id' && name === 'НОВОСТИ' ? targetSheet
       : id === 'target-id' && name === 'АНАЛИЗ' ? analysisSheet
       : id === 'target-id' && name === 'ОБЪЕКТЫ' ? objectsSheet
-      : id === 'target-id' && name === 'ИИ_ОТВЕТЫ' ? responsesSheet : null
+      : id === 'target-id' && name === 'ИИ_ОТВЕТЫ' ? responsesSheet
+      : id === 'target-id' && name === 'КАДАСТРЫ' ? cadastralSheet : null
   })},
   LockService: {getScriptLock: () => ({tryLock: () => true, releaseLock: () => {}})},
   ContentService: {
@@ -642,5 +648,74 @@ const recovered = request({
 assert.equal(recovered.candidates[0].record_key, '-1:2');
 assert.notEqual(recovered.candidates[0].claim_token, '323e4567-e89b-42d3-a456-426614174001');
 assert.equal(targetSheet.rows[2][11], 'В обработке');
+
+// The cadastral queue is idempotent, imports only into empty J/O/P, and keeps Q.
+const firstQueueSync = request({
+  version: 1, action: 'sync_cadastral_queue', secret: 'secret'
+});
+assert.equal(firstQueueSync.records_added, objectsSheet.rows.length - 1);
+assert.equal(cadastralSheet.rows.length, objectsSheet.rows.length);
+const queueTasks = request({
+  version: 1, action: 'read_cadastral_tasks', secret: 'secret', limit: 500
+});
+assert.equal(queueTasks.tasks.length, objectsSheet.rows.length - 1);
+const secondObjectTask = queueTasks.tasks.find(task => task.object_id.endsWith('|2'));
+assert.ok(secondObjectTask);
+assert.equal(request({
+  version: 1, action: 'update_cadastral_result', secret: 'secret',
+  object_id: secondObjectTask.object_id,
+  region: secondObjectTask.region,
+  locality: secondObjectTask.locality,
+  address: secondObjectTask.address,
+  expected_status: 'ОЖИДАЕТ',
+  cadastral_number: '',
+  cadastral_quarter: '31:16:0101001',
+  all_cadastral: '31:16:0101001:77',
+  status: 'НАЙДЕНО', error: '', checked_at: '30.10.2026 10:00:00'
+}).status, 'updated');
+const importedQueue = request({
+  version: 1, action: 'sync_cadastral_queue', secret: 'secret'
+});
+assert.equal(importedQueue.results_received, 1);
+assert.equal(objectsSheet.rows[2][9], '-');
+assert.equal(objectsSheet.rows[2][15], '31:16:0101001:77');
+assert.equal(request({
+  version: 1, action: 'sync_cadastral_queue', secret: 'secret'
+}).results_received, 0);
+
+const thirdAnalysisId = '423e4567-e89b-42d3-a456-426614174003';
+objectsSheet.rows.push([
+  thirdAnalysisId, '1', 'GigaChat', 'Объект', '', 'Организация',
+  'Регион', 'Город', 'ул. Новая, д. 1', '', '', '', '', '', '', '', ''
+]);
+const syncWithNewObject = request({
+  version: 1, action: 'sync_cadastral_queue', secret: 'secret'
+});
+assert.equal(syncWithNewObject.records_added, 1);
+assert.equal(syncWithNewObject.formulas_prepared, 1);
+assert.ok(objectsSheet.rows[objectsSheet.rows.length - 1][16].startsWith('=AI('));
+const newTask = request({
+  version: 1, action: 'read_cadastral_tasks', secret: 'secret', limit: 500
+}).tasks.find(task => task.object_id === thirdAnalysisId + '|1');
+objectsSheet.rows[objectsSheet.rows.length - 1][8] = 'ул. Новая, д. 2';
+assert.equal(request({
+  version: 1, action: 'sync_cadastral_queue', secret: 'secret'
+}).address_resets, 1);
+assert.equal(request({
+  version: 1, action: 'update_cadastral_result', secret: 'secret',
+  object_id: newTask.object_id, region: newTask.region,
+  locality: newTask.locality, address: newTask.address,
+  expected_status: 'ОЖИДАЕТ', cadastral_number: '31:16:1:1',
+  cadastral_quarter: '31:16:1', all_cadastral: '31:16:1:1',
+  status: 'НАЙДЕНО', error: '', checked_at: '30.10.2026 10:01:00'
+}).status, 'stale');
+
+objectsSheet.rows.push([...objectsSheet.rows[objectsSheet.rows.length - 1]]);
+const duplicateQueueSource = request({
+  version: 1, action: 'sync_cadastral_queue', secret: 'secret'
+});
+assert.equal(duplicateQueueSource.status, 'error');
+assert.equal(duplicateQueueSource.error, 'duplicate_object_identity');
+objectsSheet.rows.pop();
 console.log('Apps Script offline tests: OK');
 

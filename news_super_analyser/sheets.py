@@ -18,6 +18,7 @@ MAX_GEMINI_BATCH_SIZE = 20
 MAX_GIGA_BATCH_SIZE = 20
 MAX_AI_BATCH_SIZE = 20
 MAX_OBJECT_BATCH_SIZE = 500
+MAX_CADASTRAL_TASK_BATCH_SIZE = 500
 
 
 class SheetsGateway(Protocol):
@@ -530,6 +531,105 @@ class AppsScriptGateway:
                 "Apps Script response has invalid object enrichment fields"
             )
         return {"status": str(status), "updated_fields": list(updated_fields)}
+
+    def sync_cadastral_queue(self) -> dict[str, int]:
+        payload = call_with_retry(
+            lambda: self._request("sync_cadastral_queue"),
+            attempts=self.attempts,
+            sleep=self._sleep,
+            logger=self.logger,
+        )
+        fields = (
+            "records_added",
+            "results_received",
+            "address_resets",
+            "formulas_prepared",
+            "objects_checked",
+        )
+        if not all(
+            isinstance(payload.get(field), int) and payload[field] >= 0
+            for field in fields
+        ):
+            raise AppsScriptError("Apps Script response has invalid cadastral sync counts")
+        return {field: int(payload[field]) for field in fields}
+
+    def read_cadastral_tasks(self, limit: int) -> dict[str, Any]:
+        if not 1 <= limit <= MAX_CADASTRAL_TASK_BATCH_SIZE:
+            raise ValueError(
+                f"limit must be between 1 and {MAX_CADASTRAL_TASK_BATCH_SIZE}"
+            )
+        payload = self._read(
+            "read_cadastral_tasks", parameters={"limit": limit}
+        )
+        tasks = payload.get("tasks")
+        total_records = payload.get("total_records")
+        if not isinstance(tasks, list) or not isinstance(total_records, int):
+            raise AppsScriptError("Apps Script response has invalid cadastral tasks")
+        expected = {
+            "object_id",
+            "region",
+            "locality",
+            "address",
+            "cadastral_number",
+            "cadastral_quarter",
+            "all_cadastral",
+            "status",
+            "error",
+            "checked_at",
+        }
+        normalized: list[dict[str, str]] = []
+        for task in tasks:
+            if (
+                not isinstance(task, dict)
+                or not expected.issubset(task)
+                or not all(isinstance(task[field], str) for field in expected)
+            ):
+                raise AppsScriptError("Apps Script response has invalid cadastral task")
+            normalized.append({field: task[field] for field in expected})
+        return {"tasks": normalized, "total_records": total_records}
+
+    def update_cadastral_task(
+        self,
+        *,
+        object_id: str,
+        region: str,
+        locality: str,
+        address: str,
+        expected_status: str,
+        cadastral_number: str,
+        cadastral_quarter: str,
+        all_cadastral: str,
+        status: str,
+        error: str,
+        checked_at: str,
+    ) -> str:
+        values = {
+            "object_id": object_id,
+            "region": region,
+            "locality": locality,
+            "address": address,
+            "expected_status": expected_status,
+            "cadastral_number": cadastral_number,
+            "cadastral_quarter": cadastral_quarter,
+            "all_cadastral": all_cadastral,
+            "status": status,
+            "error": error,
+            "checked_at": checked_at,
+        }
+        if not all(isinstance(value, str) for value in values.values()):
+            raise ValueError("cadastral task values must be strings")
+        payload = call_with_retry(
+            lambda: self._request(
+                "update_cadastral_result", parameters=values
+            ),
+            attempts=self.attempts,
+            sleep=self._sleep,
+            logger=self.logger,
+        )
+        result = payload.get("status")
+        if result not in {"updated", "already_processed", "stale", "not_found"}:
+            raise AppsScriptError("Apps Script response has invalid cadastral update status")
+        return str(result)
 
     def finalize_ai_candidate(
         self, *, record_key: str, claim_token: str, final_status: str

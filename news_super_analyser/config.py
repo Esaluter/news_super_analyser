@@ -98,6 +98,13 @@ def _env_bool(name: str, default: bool) -> bool:
     raise ConfigurationError(f"{name} должен быть true или false")
 
 
+def cadastre_mode_from_env() -> str:
+    mode = os.getenv("CADASTRE_MODE", "sheets").strip().casefold()
+    if mode not in {"sheets", "direct"}:
+        raise ConfigurationError("CADASTRE_MODE должен быть равен sheets или direct")
+    return mode
+
+
 @dataclass(frozen=True)
 class MonitoringSettings:
     """Configuration used by the autonomous TG-09 entry point."""
@@ -109,6 +116,7 @@ class MonitoringSettings:
     telegram_bot_token: str
     telegram_chat_id: str
     google_sheet_url: str
+    cadastre_mode: str
 
     @classmethod
     def from_env(cls) -> "MonitoringSettings":
@@ -144,6 +152,8 @@ class MonitoringSettings:
         if parsed.scheme != "https" or not parsed.netloc:
             raise ConfigurationError("GOOGLE_SHEET_URL должен быть HTTPS URL")
 
+        cadastre_mode = cadastre_mode_from_env()
+
         return cls(
             base=base,
             manual_run=_env_bool("MANUAL_RUN", True),
@@ -152,5 +162,6 @@ class MonitoringSettings:
             telegram_bot_token=token,
             telegram_chat_id=chat_id,
             google_sheet_url=sheet_url,
+            cadastre_mode=cadastre_mode,
         )
 

@@ -14,6 +14,7 @@ const SOURCE_SHEET = 'ИЖС-КОРП';
 const TARGET_SHEET = 'НОВОСТИ';
 const ANALYSIS_SHEET = 'АНАЛИЗ';
 const OBJECTS_SHEET = 'ОБЪЕКТЫ';
+const CADASTRAL_SHEET = 'КАДАСТРЫ';
 const AI_RESPONSES_SHEET = 'ИИ_ОТВЕТЫ';
 const SOURCE_HEADERS = [
   'record_key',
@@ -65,6 +66,17 @@ const OBJECT_ENRICHMENT_HEADERS = [
 ];
 const OBJECT_HEADERS = OBJECT_BASE_HEADERS.concat(OBJECT_ENRICHMENT_HEADERS);
 const MAX_OBJECT_BATCH_SIZE = 500;
+const MAX_CADASTRAL_TASK_BATCH_SIZE = 500;
+const CADASTRAL_HEADERS = [
+  'ID объекта', 'Регион', 'Населённый пункт', 'Адрес',
+  'Кадастровый номер', 'Кадастровый квартал', 'Все кадастровые номера',
+  'Статус', 'Ошибка', 'Дата проверки'
+];
+const CADASTRAL_PENDING = 'ОЖИДАЕТ';
+const CADASTRAL_FOUND = 'НАЙДЕНО';
+const CADASTRAL_AMBIGUOUS = 'НЕОДНОЗНАЧНО';
+const CADASTRAL_NOT_FOUND = 'НЕ НАЙДЕНО';
+const CADASTRAL_ERROR = 'ОШИБКА';
 const OBJECT_GEMINI_PROMPT = "Find one publicly available street address of the organization or property described in the provided row, located in Russia. Use the organization name from column F if available; otherwise use the property name from column D. Use the city from column H and the region from column G. Return only the address, preferably in Russian. If no reliable address can be found, return 'Not found'. Do not invent information.";
 const NEWS_TIMEZONE_UTC_OFFSET_MINUTES = 5 * 60;
 const NEWS_DATE_TIME_NUMBER_FORMAT = 'dd.MM.yyyy HH:mm:ss';
@@ -148,6 +160,15 @@ function doPost(e) {
     }
     if (request.action === 'update_object_enrichment') {
       return jsonResponse_(updateObjectEnrichment_(properties, request));
+    }
+    if (request.action === 'sync_cadastral_queue') {
+      return jsonResponse_(syncCadastralQueue_(properties));
+    }
+    if (request.action === 'read_cadastral_tasks') {
+      return jsonResponse_(readCadastralTasks_(properties, request));
+    }
+    if (request.action === 'update_cadastral_result') {
+      return jsonResponse_(updateCadastralResult_(properties, request));
     }
     return jsonResponse_({ok: false, error: 'unsupported_action'});
   } catch (error) {
@@ -829,6 +850,228 @@ function updateObjectEnrichment_(properties, request) {
 }
 
 
+function syncCadastralQueue_(properties) {
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(30000)) return {ok: false, status: 'error', error: 'busy'};
+  try {
+    const objectsSheet = openSheet_(properties, 'TARGET_SPREADSHEET_ID', OBJECTS_SHEET);
+    const queueSheet = openSheet_(properties, 'TARGET_SPREADSHEET_ID', CADASTRAL_SHEET);
+    assertHeaders_(objectsSheet, OBJECT_HEADERS);
+    assertHeaders_(queueSheet, CADASTRAL_HEADERS);
+    const queueById = cadastralRowsById_(queueSheet);
+    const lastObjectRow = objectsSheet.getLastRow();
+    const counts = {
+      records_added: 0,
+      results_received: 0,
+      address_resets: 0,
+      formulas_prepared: 0,
+      objects_checked: Math.max(0, lastObjectRow - 1)
+    };
+    if (lastObjectRow < 2) return Object.assign({ok: true}, counts);
+    const objectRange = objectsSheet.getRange(
+      2, 1, lastObjectRow - 1, OBJECT_HEADERS.length
+    );
+    const objectRows = objectRange.getDisplayValues();
+    const objectFormulas = objectRange.getFormulas();
+    const rowsToAppend = [];
+    const seenObjectIds = new Set();
+    objectRows.forEach(function(row, index) {
+      const analysisId = validatedAnalysisId_(row[0]);
+      const objectNumber = String(row[1] || '');
+      if (!/^\d+$/.test(objectNumber) || Number(objectNumber) < 1) {
+        throw new Error('invalid_object_number');
+      }
+      const objectId = analysisId + '|' + objectNumber;
+      if (seenObjectIds.has(objectId)) throw new Error('duplicate_object_identity');
+      seenObjectIds.add(objectId);
+      const region = String(row[6] || '');
+      const locality = String(row[7] || '');
+      const address = String(row[8] || '');
+      const queueEntry = queueById.get(objectId);
+      if (!queueEntry) {
+        rowsToAppend.push([
+          objectId, region, locality, address, '', '', '',
+          CADASTRAL_PENDING, '', ''
+        ]);
+        counts.records_added += 1;
+      } else {
+        const queueRow = queueEntry.values;
+        if (
+          queueRow[1] !== region || queueRow[2] !== locality ||
+          queueRow[3] !== address
+        ) {
+          queueSheet.getRange(queueEntry.rowNumber, 2, 1, 9).setValues([[
+            safeCell_(region), safeCell_(locality), safeCell_(address),
+            '', '', '', CADASTRAL_PENDING, '', ''
+          ]]);
+          counts.address_resets += 1;
+        } else if ([CADASTRAL_FOUND, CADASTRAL_AMBIGUOUS].includes(queueRow[7])) {
+          const mappings = [
+            {queueIndex: 4, objectColumn: 10},
+            {queueIndex: 5, objectColumn: 15},
+            {queueIndex: 6, objectColumn: 16}
+          ];
+          let objectUpdated = false;
+          mappings.forEach(function(mapping) {
+            const value = String(queueRow[mapping.queueIndex] || '');
+            if (!value) return;
+            const current = cellContent_(
+              row[mapping.objectColumn - 1],
+              objectFormulas[index][mapping.objectColumn - 1]
+            );
+            if (current !== '') return;
+            objectsSheet.getRange(index + 2, mapping.objectColumn, 1, 1)
+              .setValues([[safeCell_(value)]]);
+            objectUpdated = true;
+          });
+          if (objectUpdated) counts.results_received += 1;
+        }
+      }
+      if (
+        cellContent_(row[16], objectFormulas[index][16]) === '' &&
+        locality.trim() &&
+        (String(row[5] || '').trim() || String(row[3] || '').trim())
+      ) {
+        objectsSheet.getRange(index + 2, 17, 1, 1)
+          .setFormula(objectGeminiFormula_(index + 2));
+        counts.formulas_prepared += 1;
+      }
+    });
+    appendRows_(queueSheet, rowsToAppend);
+    return Object.assign({ok: true}, counts);
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+
+function readCadastralTasks_(properties, request) {
+  const limit = Number(request.limit);
+  if (!Number.isInteger(limit) || limit < 1 || limit > MAX_CADASTRAL_TASK_BATCH_SIZE) {
+    throw new Error('invalid_cadastral_task_limit');
+  }
+  const sheet = openSheet_(properties, 'TARGET_SPREADSHEET_ID', CADASTRAL_SHEET);
+  assertHeaders_(sheet, CADASTRAL_HEADERS);
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return {ok: true, total_records: 0, tasks: []};
+  const rows = sheet.getRange(2, 1, lastRow - 1, CADASTRAL_HEADERS.length)
+    .getDisplayValues();
+  const seen = new Set();
+  const tasks = [];
+  rows.forEach(function(row) {
+    const objectId = validatedObjectId_(row[0]);
+    if (seen.has(objectId)) throw new Error('duplicate_cadastral_object_id');
+    seen.add(objectId);
+    if (tasks.length >= limit || ![CADASTRAL_PENDING, CADASTRAL_ERROR].includes(row[7])) {
+      return;
+    }
+    tasks.push({
+      object_id: objectId,
+      region: String(row[1] || ''),
+      locality: String(row[2] || ''),
+      address: String(row[3] || ''),
+      cadastral_number: String(row[4] || ''),
+      cadastral_quarter: String(row[5] || ''),
+      all_cadastral: String(row[6] || ''),
+      status: String(row[7] || ''),
+      error: String(row[8] || ''),
+      checked_at: String(row[9] || '')
+    });
+  });
+  return {ok: true, total_records: rows.length, tasks: tasks};
+}
+
+
+function updateCadastralResult_(properties, request) {
+  const objectId = validatedObjectId_(request.object_id);
+  const region = validatedCell_(request.region, 'invalid_cadastral_snapshot');
+  const locality = validatedCell_(request.locality, 'invalid_cadastral_snapshot');
+  const address = validatedCell_(request.address, 'invalid_cadastral_snapshot');
+  const expectedStatus = validateCadastralStatus_(request.expected_status, true);
+  const resultStatus = validateCadastralStatus_(request.status, false);
+  const result = [
+    validatedCell_(request.cadastral_number, 'invalid_cadastral_result'),
+    validatedCell_(request.cadastral_quarter, 'invalid_cadastral_result'),
+    validatedCell_(request.all_cadastral, 'invalid_cadastral_result'),
+    resultStatus,
+    validatedCell_(request.error, 'invalid_cadastral_result'),
+    validatedCell_(request.checked_at, 'invalid_cadastral_result')
+  ];
+  if (resultStatus === CADASTRAL_NOT_FOUND && result.slice(0, 3).some(Boolean)) {
+    throw new Error('invalid_cadastral_result');
+  }
+  if (resultStatus === CADASTRAL_AMBIGUOUS && (result[0] || !result[2])) {
+    throw new Error('invalid_cadastral_result');
+  }
+  if (resultStatus === CADASTRAL_FOUND && !result.slice(0, 3).some(Boolean)) {
+    throw new Error('invalid_cadastral_result');
+  }
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(30000)) return {ok: false, status: 'error', error: 'busy'};
+  try {
+    const sheet = openSheet_(properties, 'TARGET_SPREADSHEET_ID', CADASTRAL_SHEET);
+    assertHeaders_(sheet, CADASTRAL_HEADERS);
+    const byId = cadastralRowsById_(sheet);
+    const entry = byId.get(objectId);
+    if (!entry) return {ok: true, status: 'not_found'};
+    const current = entry.values;
+    if (current[1] !== region || current[2] !== locality || current[3] !== address) {
+      return {ok: true, status: 'stale'};
+    }
+    if (current[7] !== expectedStatus) {
+      const currentResult = current.slice(4, 10);
+      if (JSON.stringify(currentResult) === JSON.stringify(result)) {
+        return {ok: true, status: 'already_processed'};
+      }
+      return {ok: true, status: 'stale'};
+    }
+    sheet.getRange(entry.rowNumber, 5, 1, 6)
+      .setValues([result.map(safeCell_)]);
+    return {ok: true, status: 'updated'};
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+
+function cadastralRowsById_(sheet) {
+  const result = new Map();
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return result;
+  const rows = sheet.getRange(2, 1, lastRow - 1, CADASTRAL_HEADERS.length)
+    .getDisplayValues();
+  rows.forEach(function(row, index) {
+    const objectId = validatedObjectId_(row[0]);
+    if (result.has(objectId)) throw new Error('duplicate_cadastral_object_id');
+    result.set(objectId, {rowNumber: index + 2, values: row});
+  });
+  return result;
+}
+
+
+function validatedObjectId_(value) {
+  const objectId = String(value || '');
+  const separator = objectId.lastIndexOf('|');
+  if (separator < 1) throw new Error('invalid_cadastral_object_id');
+  validatedAnalysisId_(objectId.slice(0, separator));
+  const objectNumber = objectId.slice(separator + 1);
+  if (!/^\d+$/.test(objectNumber) || Number(objectNumber) < 1) {
+    throw new Error('invalid_cadastral_object_id');
+  }
+  return objectId;
+}
+
+
+function validateCadastralStatus_(value, pendingOnly) {
+  const status = String(value || '');
+  const allowed = pendingOnly
+    ? [CADASTRAL_PENDING, CADASTRAL_ERROR]
+    : [CADASTRAL_FOUND, CADASTRAL_AMBIGUOUS, CADASTRAL_NOT_FOUND, CADASTRAL_ERROR];
+  if (!allowed.includes(status)) throw new Error('invalid_cadastral_status');
+  return status;
+}
+
+
 function matchingObjectRows_(sheet, analysisId, objectNumber) {
   const lastRow = sheet.getLastRow();
   if (lastRow < 2) return [];
@@ -1196,7 +1439,13 @@ function publicError_(error) {
     'invalid_object_row_number',
     'invalid_object_enrichment_values',
     'invalid_object_gemini_flag',
-    'duplicate_object_identity'
+    'duplicate_object_identity',
+    'invalid_cadastral_task_limit',
+    'invalid_cadastral_object_id',
+    'duplicate_cadastral_object_id',
+    'invalid_cadastral_snapshot',
+    'invalid_cadastral_result',
+    'invalid_cadastral_status'
   ]);
   if (exact.has(message)) return message;
   if (/^(missing_|required_sheet_missing_|invalid_headers_)/.test(message)) {

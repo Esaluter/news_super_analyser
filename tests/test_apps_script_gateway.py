@@ -438,3 +438,67 @@ def test_object_enrichment_gateway_rejects_invalid_limit(limit):
     with pytest.raises(ValueError, match="limit"):
         gateway.read_object_enrichment_candidates(limit)
 
+
+def test_cadastral_queue_gateway_contract():
+    calls = []
+    task = {
+        "object_id": "123e4567-e89b-42d3-a456-426614174000|1",
+        "region": "Регион",
+        "locality": "Город",
+        "address": "ул. Новая, д. 1",
+        "cadastral_number": "",
+        "cadastral_quarter": "",
+        "all_cadastral": "",
+        "status": "ОЖИДАЕТ",
+        "error": "",
+        "checked_at": "",
+    }
+
+    def post(_url, **kwargs):
+        body = kwargs["json"]
+        calls.append(body)
+        if body["action"] == "sync_cadastral_queue":
+            return FakeResponse(
+                {
+                    "ok": True,
+                    "records_added": 1,
+                    "results_received": 0,
+                    "address_resets": 0,
+                    "formulas_prepared": 1,
+                    "objects_checked": 1,
+                }
+            )
+        if body["action"] == "read_cadastral_tasks":
+            return FakeResponse({"ok": True, "total_records": 1, "tasks": [task]})
+        return FakeResponse({"ok": True, "status": "updated"})
+
+    gateway = AppsScriptGateway("https://script.google.com/test/exec", "secret", post=post)
+
+    assert gateway.sync_cadastral_queue()["records_added"] == 1
+    assert gateway.read_cadastral_tasks(500)["tasks"] == [task]
+    assert gateway.update_cadastral_task(
+        object_id=task["object_id"],
+        region=task["region"],
+        locality=task["locality"],
+        address=task["address"],
+        expected_status="ОЖИДАЕТ",
+        cadastral_number="31:16:1:1",
+        cadastral_quarter="31:16:1",
+        all_cadastral="31:16:1:1",
+        status="НАЙДЕНО",
+        error="",
+        checked_at="30.10.2026 10:00:00",
+    ) == "updated"
+    assert [call["action"] for call in calls] == [
+        "sync_cadastral_queue",
+        "read_cadastral_tasks",
+        "update_cadastral_result",
+    ]
+
+
+@pytest.mark.parametrize("limit", [0, 501])
+def test_cadastral_queue_gateway_rejects_invalid_limit(limit):
+    gateway = AppsScriptGateway("https://script.google.com/test/exec", "secret")
+    with pytest.raises(ValueError, match="limit"):
+        gateway.read_cadastral_tasks(limit)
+

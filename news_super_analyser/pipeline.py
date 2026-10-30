@@ -25,6 +25,9 @@ class CycleReport:
     analyzed_news: int = 0
     processed_objects: int = 0
     cadastral_numbers_found: int = 0
+    cadastral_records_added: int = 0
+    cadastral_results_received: int = 0
+    cadastre_mode: str = "sheets"
     errors: int = 0
     outcomes: list[StageOutcome] = field(default_factory=list)
     skipped_overlap: bool = False
@@ -33,8 +36,14 @@ class CycleReport:
     @property
     def useful_work(self) -> bool:
         return any(
-            (self.new_news, self.analyzed_news, self.processed_objects,
-             self.cadastral_numbers_found)
+            (
+                self.new_news,
+                self.analyzed_news,
+                self.processed_objects,
+                self.cadastral_numbers_found,
+                self.cadastral_records_added,
+                self.cadastral_results_received,
+            )
         )
 
     @property
@@ -67,6 +76,7 @@ class MonitoringPipeline:
         giga_text: Callable[[], Any],
         analysis: Callable[[], Any],
         cadastral: Callable[[], Any],
+        cadastre_mode: str = "sheets",
         logger: logging.Logger | None = None,
         now: Callable[[], datetime] = datetime.now,
     ) -> None:
@@ -79,14 +89,17 @@ class MonitoringPipeline:
             ("кадастровое обогащение", cadastral),
         )
         self.logger = logger or logging.getLogger(__name__)
+        self.cadastre_mode = cadastre_mode
         self._now = now
         self._lock = threading.Lock()
 
     def run_cycle(self) -> CycleReport:
         if not self._lock.acquire(blocking=False):
             raise CycleAlreadyRunning("цикл мониторинга уже выполняется")
-        report = CycleReport(finished_at=self._now())
-        self.logger.info("TG-09: полный цикл начат")
+        report = CycleReport(finished_at=self._now(), cadastre_mode=self.cadastre_mode)
+        self.logger.info(
+            "TG-09: полный цикл начат; кадастровый режим=%s", self.cadastre_mode
+        )
         try:
             for name, stage in self._stages:
                 self._run_stage(name, stage, report)
@@ -154,4 +167,10 @@ def _merge_counts(name: str, value: Any, report: CycleReport) -> None:
     elif name == "кадастровое обогащение":
         report.cadastral_numbers_found += int(
             getattr(value, "cadastral_numbers_found", 0) or 0
+        )
+        report.cadastral_records_added += int(
+            getattr(value, "records_added", 0) or 0
+        )
+        report.cadastral_results_received += int(
+            getattr(value, "results_received", 0) or 0
         )

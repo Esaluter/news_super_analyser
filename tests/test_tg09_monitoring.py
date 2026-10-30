@@ -20,6 +20,8 @@ class Result:
     model_errors: int = 0
     write_errors: int = 0
     cadastral_numbers_found: int = 0
+    records_added: int = 0
+    results_received: int = 0
 
 
 @dataclass
@@ -66,6 +68,16 @@ def test_complete_successful_cycle():
     assert report.cadastral_numbers_found == 2
     assert report.errors == 0
     assert report.status == "успешно"
+
+
+def test_sheets_mode_merges_queue_counts_without_local_queue_errors():
+    subject, _ = pipeline(
+        cadastral=Result(records_added=3, results_received=2),
+    )
+    report = subject.run_cycle()
+    assert report.cadastral_records_added == 3
+    assert report.cadastral_results_received == 2
+    assert report.errors == 0
 
 
 def test_no_new_news_can_still_process_backlog():

@@ -45,6 +45,15 @@ def test_monitoring_settings_read_environment(monkeypatch):
     assert settings.manual_run is False
     assert settings.monitor_interval_minutes == 15
     assert settings.telegram_notifications_enabled is True
+    assert settings.cadastre_mode == "sheets"
+
+
+def test_cadastre_mode_direct_and_invalid_value(monkeypatch):
+    set_env(monkeypatch, CADASTRE_MODE="direct")
+    assert MonitoringSettings.from_env().cadastre_mode == "direct"
+    set_env(monkeypatch, CADASTRE_MODE="automatic")
+    with pytest.raises(ConfigurationError, match="CADASTRE_MODE"):
+        MonitoringSettings.from_env()
 
 
 @pytest.mark.parametrize("value", ["0", "-1", "1.5", "hour"])
@@ -91,6 +100,17 @@ def test_zero_new_news_report_contains_actual_old_work_and_link():
     assert "Проанализировано: <b>1</b>" in message
     assert "Следующая проверка: <b>не запланирована (ручной режим)</b>" in message
     assert 'href="https://docs.google.com/' in message
+    assert "Кадастровых записей добавлено" in message
+    assert "Кадастровых результатов получено" in message
+    assert "Найдено кадастровых номеров" not in message
+
+
+def test_direct_mode_report_keeps_direct_cadastral_counter():
+    report = sample_report()
+    report.cadastre_mode = "direct"
+    message = format_cycle_message(report, "https://example.test/sheet")
+    assert "Найдено кадастровых номеров: <b>1</b>" in message
+    assert "Кадастровых записей добавлено" not in message
 
 
 def test_automatic_report_contains_planned_next_check():

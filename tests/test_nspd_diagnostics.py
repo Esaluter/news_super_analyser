@@ -49,6 +49,7 @@ def test_diagnostic_mode_accepts_explicit_one(monkeypatch):
 
 def test_monitoring_entrypoint_exits_through_diagnostics_before_configuration(monkeypatch):
     monkeypatch.setenv("NSPD_DIAGNOSTIC_MODE", "1")
+    monkeypatch.setenv("CADASTRE_MODE", "direct")
     calls = []
     monkeypatch.setattr(subject, "run_diagnostics", lambda: calls.append("diag") or 0)
     monkeypatch.setattr(
@@ -64,6 +65,18 @@ def test_monitoring_entrypoint_exits_through_diagnostics_before_configuration(mo
 
     assert monitoring_app.main() == 0
     assert calls == ["diag"]
+
+
+def test_sheets_mode_rejects_nspd_diagnostics(monkeypatch):
+    monkeypatch.setenv("NSPD_DIAGNOSTIC_MODE", "1")
+    monkeypatch.setenv("CADASTRE_MODE", "sheets")
+    monkeypatch.setattr(
+        subject,
+        "run_diagnostics",
+        lambda: pytest.fail("NSPD diagnostics must not run in sheets mode"),
+    )
+
+    assert monitoring_app.main() == 2
 
 
 def test_dns_failure_and_timeout_are_classified(monkeypatch):
