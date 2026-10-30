@@ -30,6 +30,18 @@ class CadastralQueueGateway(Protocol):
     def update_cadastral_task(self, **values: str) -> str: ...
 
 
+class CadastralQueueDiagnostics(Protocol):
+    def begin_task(self, task: dict[str, str]) -> None: ...
+
+    def record_task(
+        self, task: dict[str, str], evaluation: "CadastralTaskEvaluation"
+    ) -> None: ...
+
+    def record_task_error(
+        self, task: dict[str, str], exc: BaseException
+    ) -> None: ...
+
+
 @dataclass(frozen=True)
 class QueueSyncStats:
     records_added: int = 0
@@ -50,6 +62,16 @@ class LocalQueueStats:
     errors: int = 0
     skipped: int = 0
     duration_seconds: float = 0.0
+
+
+@dataclass(frozen=True)
+class CadastralTaskEvaluation:
+    cadastral_number: str
+    cadastral_quarter: str
+    all_cadastral: str
+    status: str
+    error: str
+    diagnostic: Any
 
 
 class CadastralQueueSynchronizer:
@@ -123,12 +145,14 @@ class LocalCadastralQueueProcessor:
         limits: CadastralLimits,
         logger: logging.Logger | None = None,
         sleep: Any = time.sleep,
+        diagnostics: CadastralQueueDiagnostics | None = None,
     ) -> None:
         self.gateway = gateway
         self.searcher = searcher
         self.limits = limits
         self.logger = logger or logging.getLogger(__name__)
         self.sleep = sleep
+        self.diagnostics = diagnostics
 
     def run(self, limit: int) -> LocalQueueStats:
         started = time.monotonic()
@@ -170,6 +194,53 @@ class LocalCadastralQueueProcessor:
         return stats
 
     def _process_task(self, task: dict[str, str], stats: LocalQueueStats) -> None:
+        evaluation = self.diagnose_task(task)
+        checked_at = datetime.now().astimezone().strftime("%d.%m.%Y %H:%M:%S")
+        write_status = self.gateway.update_cadastral_task(
+            object_id=task["object_id"],
+            region=task["region"],
+            locality=task["locality"],
+            address=task["address"],
+            expected_status=task["status"],
+            cadastral_number=evaluation.cadastral_number,
+            cadastral_quarter=evaluation.cadastral_quarter,
+            all_cadastral=evaluation.all_cadastral,
+            status=evaluation.status,
+            error=evaluation.error,
+            checked_at=checked_at,
+        )
+        if write_status in {"stale", "not_found"}:
+            stats.skipped += 1
+            self.logger.warning(
+                "Кадастровая запись id=%s не записана: %s",
+                task["object_id"],
+                write_status,
+            )
+            return
+        if evaluation.status == STATUS_FOUND:
+            stats.found += 1
+        elif evaluation.status == STATUS_AMBIGUOUS:
+            stats.ambiguous += 1
+        elif evaluation.status == STATUS_NOT_FOUND:
+            stats.not_found += 1
+        else:
+            stats.errors += 1
+        self.logger.info(
+            "Кадастровая запись id=%s номер=%r квартал=%r все=%r статус=%s "
+            "ошибка=%r запись=%s",
+            task["object_id"],
+            evaluation.cadastral_number,
+            evaluation.cadastral_quarter,
+            evaluation.all_cadastral,
+            evaluation.status,
+            evaluation.error,
+            write_status,
+        )
+
+    def diagnose_task(self, task: dict[str, str]) -> CadastralTaskEvaluation:
+        """Run the existing planner for one task without writing queue state."""
+
+        self._diagnostic_call("begin_task", task)
         self.logger.info(
             "Кадастровая запись id=%s регион=%r населённый_пункт=%r адрес=%r "
             "исходный_статус=%s",
@@ -179,17 +250,28 @@ class LocalCadastralQueueProcessor:
             task["address"],
             task["status"],
         )
-        planner = CadastralEnrichmentProcessor(
-            _SingleTaskGateway(task),
-            self.searcher,
-            logger=self.logger,
-            attempts=self.limits.attempts,
-            request_delay=self.limits.request_delay_seconds,
-            row_timeout_seconds=self.limits.row_timeout_seconds,
-            stage_timeout_seconds=self.limits.stage_timeout_seconds,
-            sleep=self.sleep,
-        )
-        plan_stats = planner.run(1, apply=False)
+        try:
+            planner = CadastralEnrichmentProcessor(
+                _SingleTaskGateway(task),
+                self.searcher,
+                logger=self.logger,
+                attempts=self.limits.attempts,
+                request_delay=self.limits.request_delay_seconds,
+                row_timeout_seconds=self.limits.row_timeout_seconds,
+                stage_timeout_seconds=self.limits.stage_timeout_seconds,
+                sleep=self.sleep,
+            )
+            plan_stats = planner.run(1, apply=False)
+            evaluation = self._evaluation_from_plan(task, plan_stats)
+        except Exception as exc:
+            self._diagnostic_call("record_task_error", task, exc)
+            raise
+        self._diagnostic_call("record_task", task, evaluation)
+        return evaluation
+
+    def _evaluation_from_plan(
+        self, task: dict[str, str], plan_stats: Any
+    ) -> CadastralTaskEvaluation:
         diagnostic = plan_stats.search_diagnostics[0]
         for attempt in diagnostic.attempts:
             self.logger.info(
@@ -233,45 +315,23 @@ class LocalCadastralQueueProcessor:
         else:
             status = STATUS_NOT_FOUND
             cadastral_number = cadastral_quarter = all_cadastral = ""
-
-        checked_at = datetime.now().astimezone().strftime("%d.%m.%Y %H:%M:%S")
-        write_status = self.gateway.update_cadastral_task(
-            object_id=task["object_id"],
-            region=task["region"],
-            locality=task["locality"],
-            address=task["address"],
-            expected_status=task["status"],
+        return CadastralTaskEvaluation(
             cadastral_number=cadastral_number,
             cadastral_quarter=cadastral_quarter,
             all_cadastral=all_cadastral,
             status=status,
             error=error,
-            checked_at=checked_at,
+            diagnostic=diagnostic,
         )
-        if write_status in {"stale", "not_found"}:
-            stats.skipped += 1
-            self.logger.warning(
-                "Кадастровая запись id=%s не записана: %s",
-                task["object_id"],
-                write_status,
-            )
+
+    def _diagnostic_call(self, method: str, *args: Any) -> None:
+        if self.diagnostics is None:
             return
-        if status == STATUS_FOUND:
-            stats.found += 1
-        elif status == STATUS_AMBIGUOUS:
-            stats.ambiguous += 1
-        elif status == STATUS_NOT_FOUND:
-            stats.not_found += 1
-        else:
-            stats.errors += 1
-        self.logger.info(
-            "Кадастровая запись id=%s номер=%r квартал=%r все=%r статус=%s "
-            "ошибка=%r запись=%s",
-            task["object_id"],
-            cadastral_number,
-            cadastral_quarter,
-            all_cadastral,
-            status,
-            error,
-            write_status,
-        )
+        try:
+            getattr(self.diagnostics, method)(*args)
+        except Exception as exc:
+            self.logger.error(
+                "NSPD diagnostic hook failed; method=%s error_type=%s",
+                method,
+                type(exc).__name__,
+            )

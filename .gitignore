@@ -12,6 +12,7 @@ htmlcov/
 logs/
 *.json
 !tests/fixtures/*.json
+!.vscode/launch.json
 tmp/
 temp/
 data/

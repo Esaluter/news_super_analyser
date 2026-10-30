@@ -168,6 +168,9 @@ function doPost(e) {
     if (request.action === 'read_cadastral_tasks') {
       return jsonResponse_(readCadastralTasks_(properties, request));
     }
+    if (request.action === 'read_cadastral_task_by_id') {
+      return jsonResponse_(readCadastralTaskById_(properties, request));
+    }
     if (request.action === 'update_cadastral_result') {
       return jsonResponse_(updateCadastralResult_(properties, request));
     }
@@ -979,6 +982,32 @@ function readCadastralTasks_(properties, request) {
     });
   });
   return {ok: true, total_records: rows.length, tasks: tasks};
+}
+
+
+function readCadastralTaskById_(properties, request) {
+  const objectId = validatedObjectId_(request.object_id);
+  const sheet = openSheet_(properties, 'TARGET_SPREADSHEET_ID', CADASTRAL_SHEET);
+  assertHeaders_(sheet, CADASTRAL_HEADERS);
+  const entry = cadastralRowsById_(sheet).get(objectId);
+  if (!entry) return {ok: true, status: 'not_found'};
+  const row = entry.values;
+  return {
+    ok: true,
+    status: 'found',
+    task: {
+      object_id: objectId,
+      region: String(row[1] || ''),
+      locality: String(row[2] || ''),
+      address: String(row[3] || ''),
+      cadastral_number: String(row[4] || ''),
+      cadastral_quarter: String(row[5] || ''),
+      all_cadastral: String(row[6] || ''),
+      status: String(row[7] || ''),
+      error: String(row[8] || ''),
+      checked_at: String(row[9] || '')
+    }
+  };
 }
 
 

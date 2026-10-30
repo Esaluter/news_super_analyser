@@ -565,28 +565,28 @@ class AppsScriptGateway:
         total_records = payload.get("total_records")
         if not isinstance(tasks, list) or not isinstance(total_records, int):
             raise AppsScriptError("Apps Script response has invalid cadastral tasks")
-        expected = {
-            "object_id",
-            "region",
-            "locality",
-            "address",
-            "cadastral_number",
-            "cadastral_quarter",
-            "all_cadastral",
-            "status",
-            "error",
-            "checked_at",
-        }
         normalized: list[dict[str, str]] = []
         for task in tasks:
-            if (
-                not isinstance(task, dict)
-                or not expected.issubset(task)
-                or not all(isinstance(task[field], str) for field in expected)
-            ):
-                raise AppsScriptError("Apps Script response has invalid cadastral task")
-            normalized.append({field: task[field] for field in expected})
+            normalized.append(_normalized_cadastral_task(task))
         return {"tasks": normalized, "total_records": total_records}
+
+    def read_cadastral_task(self, object_id: str) -> dict[str, str] | None:
+        if not isinstance(object_id, str) or not object_id.strip():
+            raise ValueError("object_id must be a non-empty string")
+        payload = self._read(
+            "read_cadastral_task_by_id", parameters={"object_id": object_id}
+        )
+        status = payload.get("status")
+        if status == "not_found":
+            return None
+        if status != "found":
+            raise AppsScriptError(
+                "Apps Script response has invalid cadastral lookup status"
+            )
+        task = _normalized_cadastral_task(payload.get("task"))
+        if task["object_id"] != object_id:
+            raise AppsScriptError("Apps Script response has mismatched cadastral task")
+        return task
 
     def update_cadastral_task(
         self,
@@ -736,6 +736,28 @@ def _response_retry_after(response: Any) -> float | None:
         return max(0.0, float(value)) if value is not None else None
     except (TypeError, ValueError):
         return None
+
+
+def _normalized_cadastral_task(value: Any) -> dict[str, str]:
+    fields = (
+        "object_id",
+        "region",
+        "locality",
+        "address",
+        "cadastral_number",
+        "cadastral_quarter",
+        "all_cadastral",
+        "status",
+        "error",
+        "checked_at",
+    )
+    if (
+        not isinstance(value, dict)
+        or not all(field in value for field in fields)
+        or not all(isinstance(value[field], str) for field in fields)
+    ):
+        raise AppsScriptError("Apps Script response has invalid cadastral task")
+    return {field: value[field] for field in fields}
 
 
 def _is_rows(value: Any) -> bool:

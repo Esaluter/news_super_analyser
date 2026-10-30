@@ -10,7 +10,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from .cadastral_enrichment import normalize_cadastral_number
 
@@ -24,6 +24,12 @@ class NspdHttpError(ConnectionError):
     def __init__(self, reason: str, *, status: int | None = None) -> None:
         self.status = status
         super().__init__(reason)
+
+
+class NspdResponseRecorder(Protocol):
+    max_response_bytes: int
+
+    def capture_http(self, **values: Any) -> None: ...
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -63,12 +69,14 @@ class VerifiedNspdHttpSearcher:
         timeout: float = 10.0,
         context: ssl.SSLContext | None = None,
         logger: logging.Logger | None = None,
+        debug_recorder: NspdResponseRecorder | None = None,
     ) -> None:
         if timeout <= 0:
             raise ValueError("invalid NSPD timeout setting")
         self.timeout = float(timeout)
         self.context = context or build_verified_nspd_context()
         self.logger = logger or logging.getLogger(__name__)
+        self.debug_recorder = debug_recorder
 
     def search(
         self,
@@ -107,40 +115,144 @@ class VerifiedNspdHttpSearcher:
             method="GET",
         )
         started = time.monotonic()
+        read_limit = (
+            self.debug_recorder.max_response_bytes
+            if self.debug_recorder is not None
+            else MAX_RESPONSE_BYTES
+        )
         try:
             with opener.open(request, timeout=timeout) as response:
                 status = int(response.status)
-                body = response.read(MAX_RESPONSE_BYTES + 1)
+                raw_body = response.read(read_limit + 1)
         except urllib.error.HTTPError as exc:
             status = int(exc.code)
+            duration = round((time.monotonic() - started) * 1000)
+            error_body, error_truncated = self._read_error_body(exc, read_limit)
+            self._capture_http(
+                query=query,
+                url=url,
+                status=status,
+                duration_ms=duration,
+                body=error_body,
+                body_truncated=error_truncated,
+                error=f"HTTP_{status}",
+            )
             self.logger.warning(
                 "NSPD HTTP status=%d duration_ms=%d",
                 status,
-                round((time.monotonic() - started) * 1000),
+                duration,
             )
             if status == 404:
                 return []
             raise NspdHttpError(f"HTTP_{status}", status=status) from exc
         except Exception as exc:
+            duration = round((time.monotonic() - started) * 1000)
+            self._capture_http(
+                query=query,
+                url=url,
+                status=None,
+                duration_ms=duration,
+                body=None,
+                body_truncated=False,
+                error=type(exc).__name__,
+            )
             self.logger.warning(
                 "NSPD HTTP status=ERROR error_type=%s duration_ms=%d",
                 type(exc).__name__,
-                round((time.monotonic() - started) * 1000),
+                duration,
             )
             raise
         duration = round((time.monotonic() - started) * 1000)
         self.logger.info("NSPD HTTP status=%d duration_ms=%d", status, duration)
-        if len(body) > MAX_RESPONSE_BYTES:
+        body_truncated = len(raw_body) > read_limit
+        body = raw_body[:read_limit]
+        if len(raw_body) > MAX_RESPONSE_BYTES:
+            self._capture_http(
+                query=query,
+                url=url,
+                status=status,
+                duration_ms=duration,
+                body=body,
+                body_truncated=body_truncated,
+                error="response_too_large",
+            )
             raise NspdHttpError("response_too_large", status=status)
         try:
             payload = json.loads(body.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            self._capture_http(
+                query=query,
+                url=url,
+                status=status,
+                duration_ms=duration,
+                body=body,
+                body_truncated=body_truncated,
+                error="invalid_json",
+            )
             raise NspdHttpError("invalid_json", status=status) from exc
         data = payload.get("data") if isinstance(payload, dict) else None
         features = data.get("features") if isinstance(data, dict) else None
         if not isinstance(features, list):
+            self._capture_http(
+                query=query,
+                url=url,
+                status=status,
+                duration_ms=duration,
+                body=body,
+                body_truncated=body_truncated,
+                error="invalid_response_schema",
+            )
             raise NspdHttpError("invalid_response_schema", status=status)
+        self._capture_http(
+            query=query,
+            url=url,
+            status=status,
+            duration_ms=duration,
+            body=body,
+            body_truncated=body_truncated,
+            error=None,
+        )
         return _extract_candidates(features)
+
+    def _read_error_body(
+        self, error: urllib.error.HTTPError, read_limit: int
+    ) -> tuple[bytes | None, bool]:
+        if self.debug_recorder is None:
+            return None, False
+        try:
+            body = error.read(read_limit + 1)
+        except Exception:
+            return None, False
+        return body[:read_limit], len(body) > read_limit
+
+    def _capture_http(
+        self,
+        *,
+        query: str,
+        url: str,
+        status: int | None,
+        duration_ms: int,
+        body: bytes | None,
+        body_truncated: bool,
+        error: str | None,
+    ) -> None:
+        if self.debug_recorder is None:
+            return
+        try:
+            self.debug_recorder.capture_http(
+                query=query,
+                url=url,
+                method="GET",
+                status=status,
+                duration_ms=duration_ms,
+                body=body,
+                body_truncated=body_truncated,
+                error=error,
+            )
+        except Exception as exc:
+            self.logger.error(
+                "NSPD debug capture failed; error_type=%s", type(exc).__name__
+            )
 
 
 def _extract_candidates(features: list[Any]) -> list[dict[str, str]]:

@@ -165,3 +165,45 @@ def test_main_queue_sync_exposes_only_server_counts():
     assert result.records_added == 2
     assert result.results_received == 1
     assert result.errors == 0
+
+
+def test_diagnose_completed_task_never_writes_google_sheets():
+    class ReadOnlyGateway:
+        def update_cadastral_task(self, **_values):
+            raise AssertionError("diagnostic mode must not write")
+
+    processor = LocalCadastralQueueProcessor(
+        ReadOnlyGateway(),
+        Searcher([[candidate("31:16:0101001:25")]]),
+        limits=limits(),
+    )
+
+    evaluation = processor.diagnose_task(task(status="НАЙДЕНО"))
+
+    assert evaluation.status == "НАЙДЕНО"
+    assert evaluation.cadastral_number == "31:16:0101001:25"
+
+
+def test_diagnostic_file_failure_does_not_interrupt_normal_queue_write():
+    class BrokenDiagnostics:
+        def begin_task(self, _task):
+            raise OSError("disk unavailable")
+
+        def record_task(self, _task, _evaluation):
+            raise OSError("disk unavailable")
+
+        def record_task_error(self, _task, _exc):
+            raise OSError("disk unavailable")
+
+    gateway = Gateway([task()])
+    processor = LocalCadastralQueueProcessor(
+        gateway,
+        Searcher([[candidate("31:16:0101001:25")]]),
+        limits=limits(),
+        diagnostics=BrokenDiagnostics(),
+    )
+
+    stats = processor.run(500)
+
+    assert stats.found == 1
+    assert gateway.updates[0]["status"] == "НАЙДЕНО"

@@ -676,6 +676,18 @@ assert.equal(request({
   all_cadastral: '34:34:010059:77',
   status: 'НАЙДЕНО', error: '', checked_at: '30.10.2026 10:00:00'
 }).status, 'updated');
+const queueBeforeDiagnosticRead = JSON.stringify(cadastralSheet.rows);
+const completedDiagnosticTask = request({
+  version: 1, action: 'read_cadastral_task_by_id', secret: 'secret',
+  object_id: secondObjectTask.object_id
+});
+assert.equal(completedDiagnosticTask.status, 'found');
+assert.equal(completedDiagnosticTask.task.status, 'НАЙДЕНО');
+assert.equal(JSON.stringify(cadastralSheet.rows), queueBeforeDiagnosticRead);
+assert.equal(request({
+  version: 1, action: 'read_cadastral_task_by_id', secret: 'secret',
+  object_id: '523e4567-e89b-42d3-a456-426614174005|99'
+}).status, 'not_found');
 const secondQueueRow = cadastralSheet.rows.findIndex(row =>
   row[0] === secondObjectTask.object_id
 ) + 1;
@@ -750,5 +762,13 @@ const duplicateQueueSource = request({
 assert.equal(duplicateQueueSource.status, 'error');
 assert.equal(duplicateQueueSource.error, 'duplicate_object_identity');
 objectsSheet.rows.pop();
+cadastralSheet.rows.push([...cadastralSheet.rows[1]]);
+const duplicateDiagnosticTask = request({
+  version: 1, action: 'read_cadastral_task_by_id', secret: 'secret',
+  object_id: cadastralSheet.rows[1][0]
+});
+assert.equal(duplicateDiagnosticTask.status, 'error');
+assert.equal(duplicateDiagnosticTask.error, 'duplicate_cadastral_object_id');
+cadastralSheet.rows.pop();
 console.log('Apps Script offline tests: OK');
 

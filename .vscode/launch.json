@@ -1,0 +1,35 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Кадастр — обработать очередь",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "news_super_analyser.cadastral_queue_cli",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": true
+    },
+    {
+      "name": "Кадастр — диагностика НСПД",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "news_super_analyser.cadastral_queue_cli",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": true,
+      "args": [
+        "--debug-nspd",
+        "--object-id",
+        "${input:cadastralObjectId}"
+      ]
+    }
+  ],
+  "inputs": [
+    {
+      "id": "cadastralObjectId",
+      "type": "promptString",
+      "description": "Составной ID объекта из листа КАДАСТРЫ"
+    }
+  ]
+}

@@ -496,6 +496,55 @@ def test_cadastral_queue_gateway_contract():
     ]
 
 
+def test_cadastral_diagnostic_lookup_returns_any_status_and_is_read_only():
+    task = {
+        "object_id": "123e4567-e89b-42d3-a456-426614174000|1",
+        "region": "Регион",
+        "locality": "Город",
+        "address": "ул. Новая, д. 1",
+        "cadastral_number": "31:16:0101001:25",
+        "cadastral_quarter": "31:16:0101001",
+        "all_cadastral": "31:16:0101001:25",
+        "status": "НАЙДЕНО",
+        "error": "",
+        "checked_at": "30.10.2026 10:00:00",
+    }
+    calls = []
+
+    def post(_url, **kwargs):
+        calls.append(kwargs["json"])
+        return FakeResponse({"ok": True, "status": "found", "task": task})
+
+    gateway = AppsScriptGateway(
+        "https://script.google.com/test/exec", "secret", post=post
+    )
+
+    assert gateway.read_cadastral_task(task["object_id"]) == task
+    assert calls == [
+        {
+            "version": 1,
+            "action": "read_cadastral_task_by_id",
+            "secret": "secret",
+            "request_id": calls[0]["request_id"],
+            "object_id": task["object_id"],
+        }
+    ]
+
+
+def test_cadastral_diagnostic_lookup_reports_unknown_id():
+    gateway = AppsScriptGateway(
+        "https://script.google.com/test/exec",
+        "secret",
+        post=lambda *_args, **_kwargs: FakeResponse(
+            {"ok": True, "status": "not_found"}
+        ),
+    )
+
+    assert gateway.read_cadastral_task(
+        "123e4567-e89b-42d3-a456-426614174000|99"
+    ) is None
+
+
 @pytest.mark.parametrize("limit", [0, 501])
 def test_cadastral_queue_gateway_rejects_invalid_limit(limit):
     gateway = AppsScriptGateway("https://script.google.com/test/exec", "secret")
