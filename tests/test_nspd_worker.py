@@ -62,6 +62,11 @@ def test_searcher_uses_one_killable_worker_and_sanitized_environment(monkeypatch
                         {
                             "cadastral_number": "31:16:1:1",
                             "address": "Белгород, ул Садовая, д 5",
+                            "category_name": "Здание",
+                            "building_name": "Летняя кухня",
+                            "purpose": "Нежилое здание",
+                            "permitted_use": "Размещение здания",
+                            "cadastral_quarter": "31:16:1",
                         }
                     ],
                 }
@@ -78,6 +83,9 @@ def test_searcher_uses_one_killable_worker_and_sanitized_environment(monkeypatch
     )
 
     assert result[0]["cadastral_number"] == "31:16:1:1"
+    assert result[0]["category_name"] == "Здание"
+    assert result[0]["building_name"] == "Летняя кухня"
+    assert result[0]["cadastral_quarter"] == "31:16:1"
     assert captured["timeout"] == 7
     assert "PYNSPD_CLIENT_TIMEOUT" not in captured["env"]
     assert "GIGACHAT_AUTH_KEY" not in captured["env"]

@@ -314,7 +314,7 @@ class AiAnalysisProcessor:
                 record_key,
                 analysis_id,
                 "error",
-                error=_safe_error(exc),
+                error=f"Ошибка сохранения результата анализа: {_safe_error(exc)}",
                 text_source=text_source,
             )
         return ItemResult(

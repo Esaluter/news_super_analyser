@@ -33,7 +33,7 @@ _SENSITIVE_QUERY_KEYS = {
     "password",
     "token",
 }
-_TYPE_KEYS = {"type", "object_type", "category", "category_name"}
+_TYPE_KEYS = {"type", "object_type", "category", "category_name", "categoryname"}
 _IDENTIFIER_KEYS = {
     "id",
     "object_id",
@@ -161,11 +161,7 @@ class NspdDebugRecorder:
         requests = [
             item for item in self._requests if item["object_id"] == task["object_id"]
         ]
-        numbers = [
-            value.strip()
-            for value in evaluation.all_cadastral.splitlines()
-            if value.strip()
-        ]
+        numbers = list(evaluation.cadastral_numbers)
         if evaluation.cadastral_number and evaluation.cadastral_number not in numbers:
             numbers.insert(0, evaluation.cadastral_number)
         quarters = [evaluation.cadastral_quarter] if evaluation.cadastral_quarter else []

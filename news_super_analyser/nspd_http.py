@@ -12,7 +12,10 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Protocol
 
-from .cadastral_enrichment import normalize_cadastral_number
+from .cadastral_enrichment import (
+    normalize_cadastral_number,
+    normalize_cadastral_quarter,
+)
 
 
 HOST = "nspd.gov.ru"
@@ -278,7 +281,19 @@ def _extract_candidates(features: list[Any]) -> list[dict[str, str]]:
                     or ""
                 ).strip(),
                 "category": str(properties.get("category") or ""),
-                "category_name": str(properties.get("category_name") or ""),
+                "category_name": str(
+                    properties.get("categoryName")
+                    or properties.get("category_name")
+                    or ""
+                ),
+                "building_name": str(options.get("building_name") or ""),
+                "purpose": str(options.get("purpose") or ""),
+                "permitted_use": str(
+                    options.get("permitted_use_established_by_document") or ""
+                ),
+                "cadastral_quarter": normalize_cadastral_quarter(
+                    options.get("quarter_cad_number")
+                ),
             }
         )
     return result

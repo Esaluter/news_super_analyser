@@ -15,6 +15,7 @@ from typing import Any, Callable, Protocol
 
 
 CADASTRAL_RE = re.compile(r"^(\d{1,2}):(\d{1,2}):(\d{1,7}):(\d+)$")
+CADASTRAL_QUARTER_RE = re.compile(r"^(\d{1,2}):(\d{1,2}):(\d{1,7})$")
 MAX_OBJECT_BATCH_SIZE = 500
 OBJECT_GEMINI_PROMPT = (
     "Find one publicly available street address of the organization or property "
@@ -165,6 +166,51 @@ def cadastral_quarter(value: Any) -> str:
     return ":".join(number.split(":")[:3]) if number else ""
 
 
+def normalize_cadastral_quarter(value: Any) -> str:
+    text = str(value or "").strip().replace(" ", "").replace("-", ":")
+    match = CADASTRAL_QUARTER_RE.fullmatch(text)
+    return ":".join(match.groups()) if match else ""
+
+
+def cadastral_numbers_from_display(value: Any) -> list[str]:
+    """Read numbers from both legacy and descriptive one-object-per-line text."""
+
+    result: list[str] = []
+    seen: set[str] = set()
+    for line in str(value or "").splitlines():
+        number = normalize_cadastral_number(line.split(" — ", 1)[0])
+        if number and number not in seen:
+            seen.add(number)
+            result.append(number)
+    return result
+
+
+def format_cadastral_candidate(candidate: dict[str, str]) -> str:
+    number = normalize_cadastral_number(candidate.get("cadastral_number"))
+    if not number:
+        return ""
+    category = _single_line(candidate.get("category_name"))
+    detail = next(
+        (
+            text
+            for text in (
+                _single_line(candidate.get("building_name")),
+                _single_line(candidate.get("purpose")),
+                _single_line(candidate.get("permitted_use")),
+            )
+            if text
+        ),
+        "",
+    )
+    if category and detail:
+        return f"{number} — {category} ({detail})"
+    if category:
+        return f"{number} — {category}"
+    if detail:
+        return f"{number} — {detail}"
+    return number
+
+
 def build_search_query(*, region: str, locality: str, address: str) -> str:
     return ", ".join(
         part.strip() for part in (region, locality, address) if part and part.strip()
@@ -182,19 +228,17 @@ def extract_candidates(features: Any) -> list[dict[str, str]]:
     result: list[dict[str, str]] = []
     seen: set[str] = set()
     for feature in features or []:
-        properties = getattr(feature, "properties", None)
-        options = getattr(properties, "options", None) if properties else None
+        properties = _source_value(feature, "properties")
+        options = _source_value(properties, "options") if properties else None
         if not options:
             continue
         number = normalize_cadastral_number(
-            getattr(options, "cad_number", None)
-            or getattr(options, "cad_num", None)
+            _source_value(options, "cad_number", "cad_num")
         )
         if not number or number in seen:
             continue
         address = (
-            getattr(options, "readable_address", None)
-            or getattr(options, "address_readable_address", None)
+            _source_value(options, "readable_address", "address_readable_address")
             or ""
         )
         seen.add(number)
@@ -202,13 +246,44 @@ def extract_candidates(features: Any) -> list[dict[str, str]]:
             {
                 "cadastral_number": number,
                 "address": str(address).strip(),
-                "category": str(getattr(properties, "category", None) or ""),
+                "category": str(_source_value(properties, "category") or ""),
                 "category_name": str(
-                    getattr(properties, "category_name", None) or ""
+                    _source_value(properties, "category_name", "categoryName") or ""
+                ),
+                "building_name": str(
+                    _source_value(options, "building_name") or ""
+                ),
+                "purpose": str(_source_value(options, "purpose") or ""),
+                "permitted_use": str(
+                    _source_value(
+                        options, "permitted_use_established_by_document"
+                    )
+                    or ""
+                ),
+                "cadastral_quarter": normalize_cadastral_quarter(
+                    _source_value(options, "quarter_cad_number")
                 ),
             }
         )
     return result
+
+
+def _source_value(source: Any, *names: str) -> Any:
+    if isinstance(source, dict):
+        for name in names:
+            value = source.get(name)
+            if value is not None and value != "":
+                return value
+        return None
+    for name in names:
+        value = getattr(source, name, None)
+        if value is not None and value != "":
+            return value
+    return None
+
+
+def _single_line(value: Any) -> str:
+    return " ".join(str(value or "").split())
 
 
 def _normalized_text(value: Any) -> str:
@@ -541,6 +616,10 @@ class PynspdCadastralSearcher:
                 "address": str(item.get("address", "")),
                 "category": str(item.get("category", "")),
                 "category_name": str(item.get("category_name", "")),
+                "building_name": str(item.get("building_name", "")),
+                "purpose": str(item.get("purpose", "")),
+                "permitted_use": str(item.get("permitted_use", "")),
+                "cadastral_quarter": str(item.get("cadastral_quarter", "")),
             }
             for item in candidates
         ]
@@ -746,17 +825,27 @@ class CadastralEnrichmentProcessor:
                 stage_deadline=stage_deadline,
             )
 
-        numbers = sorted(
+        candidates_by_number: dict[str, dict[str, str]] = {}
+        for item in matches:
+            number = normalize_cadastral_number(item.get("cadastral_number"))
+            if number and number not in candidates_by_number:
+                candidates_by_number[number] = item
+        numbers = sorted(candidates_by_number)
+        quarters = sorted(
             {
-                normalize_cadastral_number(item.get("cadastral_number"))
-                for item in matches
-                if normalize_cadastral_number(item.get("cadastral_number"))
+                normalize_cadastral_quarter(
+                    candidates_by_number[number].get("cadastral_quarter")
+                )
+                or cadastral_quarter(number)
+                for number in numbers
             }
         )
-        quarters = sorted({cadastral_quarter(number) for number in numbers})
         diagnostic.matching_numbers = len(numbers)
         if not current_p and numbers:
-            values["all_cadastral"] = "\n".join(numbers)
+            values["all_cadastral"] = "\n".join(
+                format_cadastral_candidate(candidates_by_number[number])
+                for number in numbers
+            )
         if not current_j and len(numbers) == 1:
             values["cadastral_number"] = numbers[0]
         if (

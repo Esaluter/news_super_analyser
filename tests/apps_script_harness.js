@@ -131,6 +131,10 @@ assert.equal(context.readyGeneratedText_('=AI("prompt";M2)', '=AI("prompt";M2)')
 assert.equal(context.readyGeneratedText_('#N/A', '=AI("prompt";M2)'), '');
 assert.equal(context.readyGeneratedText_('-', ''), '');
 assert.equal(context.sheetDateTimeSerial_(''), '');
+assert.equal(
+  context.sheetDateTimeSerial_('30.10.2026 5:16:53'),
+  context.sheetDateTimeSerial_('30.10.2026 05:16:53')
+);
 assert.throws(
   () => context.sheetDateTimeSerial_('31.02.2026 12:00:00'),
   /invalid_news_datetime/
@@ -476,16 +480,16 @@ assert.equal(request({
 assert.equal(responsesSheet.rows[1][5], 'invalid JSON');
 
 const analysisRow = [
-  analysisId, '-1:1', '01.01.2026 05:00:00', 'https://t.me/example_channel/1',
+  analysisId, '-1:1', '01.01.2026 5:00:00', 'https://t.me/example_channel/1',
   'GigaChat', 'Успешно', 'Обстрел', 'Белгородская область', 'Белгород',
   'Повреждены два объекта', '2', '', '2026-10-27T13:00:01+05:00'
 ];
 const objectRows = [
   [analysisId, '1', 'Gemini + GigaChat', 'Дом', 'жилой дом', '', 'Белгородская область',
     'Белгород', 'ул. Первая', '', 'повреждена кровля', 'фрагмент 1', '',
-    '01.01.2026 05:00:00'],
+    '01.01.2026 5:00:00'],
   [analysisId, '2', 'Gemini + GigaChat', 'Автомобиль', 'транспорт', '', 'Белгородская область',
-    'Белгород', '', '', 'повреждён', 'фрагмент 2', '', '01.01.2026 05:00:00']
+    'Белгород', '', '', 'повреждён', 'фрагмент 2', '', '01.01.2026 5:00:00']
 ];
 analysisSheet.failAfterWrite = true;
 const partialWrite = request({
@@ -673,7 +677,7 @@ assert.equal(request({
   expected_status: 'ОЖИДАЕТ',
   cadastral_number: '34:34:010059:77',
   cadastral_quarter: '34:34:010059',
-  all_cadastral: '34:34:010059:77',
+  all_cadastral: '34:34:010059:77 — Здание (Летняя кухня)',
   status: 'НАЙДЕНО', error: '', checked_at: '30.10.2026 10:00:00'
 }).status, 'updated');
 const queueBeforeDiagnosticRead = JSON.stringify(cadastralSheet.rows);
@@ -692,7 +696,8 @@ const secondQueueRow = cadastralSheet.rows.findIndex(row =>
   row[0] === secondObjectTask.object_id
 ) + 1;
 assert.deepEqual(cadastralSheet.rows[secondQueueRow - 1].slice(4, 7), [
-  '34:34:010059:77', '34:34:010059', '34:34:010059:77'
+  '34:34:010059:77', '34:34:010059',
+  '34:34:010059:77 — Здание (Летняя кухня)'
 ]);
 assert.ok(cadastralSheet.numberFormats.some(format =>
   format.row === secondQueueRow && format.col === 5 &&
@@ -704,7 +709,10 @@ const importedQueue = request({
 assert.equal(importedQueue.results_received, 1);
 assert.equal(objectsSheet.rows[2][9], '-');
 assert.equal(objectsSheet.rows[2][14], '77:06:0008009');
-assert.equal(objectsSheet.rows[2][15], '34:34:010059:77');
+assert.equal(
+  objectsSheet.rows[2][15],
+  '34:34:010059:77 — Здание (Летняя кухня)'
+);
 assert.ok(objectsSheet.numberFormats.some(format =>
   format.row === 3 && format.col === 16 && format.format === '@'
 ));

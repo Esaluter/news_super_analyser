@@ -12,6 +12,7 @@ from .cadastral_enrichment import (
     CadastralEnrichmentProcessor,
     CadastralLimits,
     CadastralSearcher,
+    cadastral_numbers_from_display,
 )
 
 
@@ -69,6 +70,7 @@ class CadastralTaskEvaluation:
     cadastral_number: str
     cadastral_quarter: str
     all_cadastral: str
+    cadastral_numbers: tuple[str, ...]
     status: str
     error: str
     diagnostic: Any
@@ -291,7 +293,7 @@ class LocalCadastralQueueProcessor:
         cadastral_number = str(plan.get("cadastral_number", ""))
         cadastral_quarter = str(plan.get("cadastral_quarter", ""))
         all_cadastral = str(plan.get("all_cadastral", ""))
-        numbers = [value for value in all_cadastral.splitlines() if value.strip()]
+        numbers = cadastral_numbers_from_display(all_cadastral)
         technical_error = diagnostic.outcome in {
             "nspd_unavailable",
             "response_error",
@@ -306,19 +308,28 @@ class LocalCadastralQueueProcessor:
             cadastral_number = task["cadastral_number"]
             cadastral_quarter = task["cadastral_quarter"]
             all_cadastral = task["all_cadastral"]
-        elif len(numbers) > 1:
+        elif diagnostic.matching_numbers > 1:
             status = STATUS_AMBIGUOUS
             cadastral_number = ""
-            error = f"несколько подходящих кадастровых номеров: {len(numbers)}"
-        elif cadastral_number or cadastral_quarter or len(numbers) == 1:
+            error = (
+                "несколько подходящих кадастровых номеров: "
+                f"{diagnostic.matching_numbers}"
+            )
+        elif (
+            cadastral_number
+            or cadastral_quarter
+            or diagnostic.matching_numbers == 1
+        ):
             status = STATUS_FOUND
         else:
             status = STATUS_NOT_FOUND
             cadastral_number = cadastral_quarter = all_cadastral = ""
+        numbers = cadastral_numbers_from_display(all_cadastral)
         return CadastralTaskEvaluation(
             cadastral_number=cadastral_number,
             cadastral_quarter=cadastral_quarter,
             all_cadastral=all_cadastral,
+            cadastral_numbers=tuple(numbers),
             status=status,
             error=error,
             diagnostic=diagnostic,

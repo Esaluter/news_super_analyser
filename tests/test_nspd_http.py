@@ -35,9 +35,13 @@ def test_local_http_search_uses_verified_context_and_parses_candidates(monkeypat
                     {
                         "properties": {
                             "category": 5,
-                            "category_name": "Здание",
+                            "categoryName": "Здание",
                             "options": {
-                                "cad_number": "31:16:0101001:25",
+                                "cad_num": "31:16:0101001:25",
+                                "quarter_cad_number": "31:16:0999999",
+                                "building_name": "Летняя кухня",
+                                "purpose": "Нежилое здание",
+                                "permitted_use_established_by_document": "Размещение здания",
                                 "readable_address": "Регион, Город, ул. Новая, д. 1",
                             },
                         }
@@ -71,6 +75,11 @@ def test_local_http_search_uses_verified_context_and_parses_candidates(monkeypat
     assert captured["timeout"] == 4
     assert "thematicSearchId=1" in captured["url"]
     assert result[0]["cadastral_number"] == "31:16:0101001:25"
+    assert result[0]["cadastral_quarter"] == "31:16:0999999"
+    assert result[0]["category_name"] == "Здание"
+    assert result[0]["building_name"] == "Летняя кухня"
+    assert result[0]["purpose"] == "Нежилое здание"
+    assert result[0]["permitted_use"] == "Размещение здания"
 
 
 def test_local_http_search_reports_403_without_disabling_tls(monkeypatch):

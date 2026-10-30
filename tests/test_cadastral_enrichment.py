@@ -448,11 +448,20 @@ def test_extract_candidates_supports_both_pynspd_number_fields():
     feature = Value()
     feature.properties = Value()
     feature.properties.options = Value()
-    feature.properties.options.cad_number = None
+    feature.properties.options.cad_number = ""
     feature.properties.options.cad_num = "31:16:0101001:25"
     feature.properties.options.readable_address = BELGOROD_ADDRESS
+    feature.properties.options.quarter_cad_number = "31:16:0999999"
+    feature.properties.options.building_name = "Летняя кухня"
+    feature.properties.options.purpose = "Нежилое здание"
+    feature.properties.options.permitted_use_established_by_document = "Размещение"
+    feature.properties.categoryName = "Здание"
 
-    assert extract_candidates([feature])[0]["cadastral_number"] == "31:16:0101001:25"
+    extracted = extract_candidates([feature])[0]
+    assert extracted["cadastral_number"] == "31:16:0101001:25"
+    assert extracted["cadastral_quarter"] == "31:16:0999999"
+    assert extracted["category_name"] == "Здание"
+    assert extracted["building_name"] == "Летняя кухня"
     assert cadastral_quarter("31:16:0101001:25") == "31:16:0101001"
 
 

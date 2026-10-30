@@ -171,6 +171,35 @@ def test_missing_news_datetime_stays_blank_for_every_object(tmp_path):
     assert {row[13] for row in gateway.object_rows} == {""}
 
 
+def test_single_digit_hour_is_forwarded_unchanged_to_successful_object_write(tmp_path):
+    gateway = Gateway([candidate(news_datetime="30.10.2026 5:16:53")])
+    result = processor(tmp_path, gateway, Client()).run()[0]
+
+    assert result.status == "success"
+    assert gateway.analysis_rows[0][2] == "30.10.2026 5:16:53"
+    assert {row[13] for row in gateway.object_rows} == {"30.10.2026 5:16:53"}
+
+
+def test_analysis_write_error_is_identified_as_storage_failure(tmp_path):
+    class FailingAnalysisGateway(Gateway):
+        def save_ai_analysis(self, row, object_rows):
+            raise RuntimeError("Apps Script rejected request: invalid_news_datetime")
+
+    gateway = FailingAnalysisGateway([candidate()])
+    result = processor(tmp_path, gateway, Client()).run()[0]
+
+    assert result.status == "error"
+    assert result.objects == 0
+    assert result.error == (
+        "Ошибка сохранения результата анализа: "
+        "Apps Script rejected request: invalid_news_datetime"
+    )
+    assert gateway.response_rows[0][4] == VALID
+    assert gateway.response_rows[0][5] == ""
+    assert gateway.analysis_rows == []
+    assert gateway.object_rows == []
+
+
 def test_success_with_no_objects(tmp_path):
     gateway = Gateway([candidate()])
     client = Client('{"incident_type":null,"region":null,"locality":null,"summary":null,"objects":[]}')
