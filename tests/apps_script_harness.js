@@ -569,12 +569,15 @@ objectsSheet.rows[2][9] = '-';
 const independentFields = request({
   version: 1, action: 'update_object_enrichment', secret: 'secret',
   analysis_id: analysisId, object_number: '2',
-  values: {cadastral_number: '31:16:0101001:77', cadastral_quarter: '31:16:0101001'},
+  values: {cadastral_number: '77:06:0008009:77', cadastral_quarter: '77:06:0008009'},
   prepare_gemini: false
 });
 assert.deepEqual(independentFields.updated_fields, ['cadastral_quarter']);
 assert.equal(objectsSheet.rows[2][9], '-');
-assert.equal(objectsSheet.rows[2][14], '31:16:0101001');
+assert.equal(objectsSheet.rows[2][14], '77:06:0008009');
+assert.ok(objectsSheet.numberFormats.some(format =>
+  format.row === 3 && format.col === 15 && format.format === '@'
+));
 assert.deepEqual(targetSheet.rows[1].slice(0, 11), JSON.parse(newsBeforeAi)[1].slice(0, 11));
 assert.deepEqual(targetSheet.rows[1].slice(12, 17), JSON.parse(newsBeforeAi)[1].slice(12, 17));
 
@@ -668,17 +671,31 @@ assert.equal(request({
   locality: secondObjectTask.locality,
   address: secondObjectTask.address,
   expected_status: 'ОЖИДАЕТ',
-  cadastral_number: '',
-  cadastral_quarter: '31:16:0101001',
-  all_cadastral: '31:16:0101001:77',
+  cadastral_number: '34:34:010059:77',
+  cadastral_quarter: '34:34:010059',
+  all_cadastral: '34:34:010059:77',
   status: 'НАЙДЕНО', error: '', checked_at: '30.10.2026 10:00:00'
 }).status, 'updated');
+const secondQueueRow = cadastralSheet.rows.findIndex(row =>
+  row[0] === secondObjectTask.object_id
+) + 1;
+assert.deepEqual(cadastralSheet.rows[secondQueueRow - 1].slice(4, 7), [
+  '34:34:010059:77', '34:34:010059', '34:34:010059:77'
+]);
+assert.ok(cadastralSheet.numberFormats.some(format =>
+  format.row === secondQueueRow && format.col === 5 &&
+  format.cols === 3 && format.format === '@'
+));
 const importedQueue = request({
   version: 1, action: 'sync_cadastral_queue', secret: 'secret'
 });
 assert.equal(importedQueue.results_received, 1);
 assert.equal(objectsSheet.rows[2][9], '-');
-assert.equal(objectsSheet.rows[2][15], '31:16:0101001:77');
+assert.equal(objectsSheet.rows[2][14], '77:06:0008009');
+assert.equal(objectsSheet.rows[2][15], '34:34:010059:77');
+assert.ok(objectsSheet.numberFormats.some(format =>
+  format.row === 3 && format.col === 16 && format.format === '@'
+));
 assert.equal(request({
   version: 1, action: 'sync_cadastral_queue', secret: 'secret'
 }).results_received, 0);
@@ -697,6 +714,22 @@ assert.ok(objectsSheet.rows[objectsSheet.rows.length - 1][16].startsWith('=AI(')
 const newTask = request({
   version: 1, action: 'read_cadastral_tasks', secret: 'secret', limit: 500
 }).tasks.find(task => task.object_id === thirdAnalysisId + '|1');
+assert.equal(request({
+  version: 1, action: 'update_cadastral_result', secret: 'secret',
+  object_id: newTask.object_id, region: newTask.region,
+  locality: newTask.locality, address: newTask.address,
+  expected_status: 'ОЖИДАЕТ', cadastral_number: '77:06:0008009:1',
+  cadastral_quarter: '77:06:0008009', all_cadastral: '77:06:0008009:1',
+  status: 'НАЙДЕНО', error: '', checked_at: '30.10.2026 10:01:00'
+}).status, 'updated');
+assert.equal(request({
+  version: 1, action: 'sync_cadastral_queue', secret: 'secret'
+}).results_received, 1);
+const thirdObjectRow = objectsSheet.rows.length;
+assert.equal(objectsSheet.rows[thirdObjectRow - 1][14], '77:06:0008009');
+assert.ok(objectsSheet.numberFormats.some(format =>
+  format.row === thirdObjectRow && format.col === 15 && format.format === '@'
+));
 objectsSheet.rows[objectsSheet.rows.length - 1][8] = 'ул. Новая, д. 2';
 assert.equal(request({
   version: 1, action: 'sync_cadastral_queue', secret: 'secret'

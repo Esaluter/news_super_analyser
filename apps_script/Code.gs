@@ -77,6 +77,7 @@ const CADASTRAL_FOUND = 'НАЙДЕНО';
 const CADASTRAL_AMBIGUOUS = 'НЕОДНОЗНАЧНО';
 const CADASTRAL_NOT_FOUND = 'НЕ НАЙДЕНО';
 const CADASTRAL_ERROR = 'ОШИБКА';
+const CADASTRAL_TEXT_NUMBER_FORMAT = '@';
 const OBJECT_GEMINI_PROMPT = "Find one publicly available street address of the organization or property described in the provided row, located in Russia. Use the organization name from column F if available; otherwise use the property name from column D. Use the city from column H and the region from column G. Return only the address, preferably in Russian. If no reliable address can be found, return 'Not found'. Do not invent information.";
 const NEWS_TIMEZONE_UTC_OFFSET_MINUTES = 5 * 60;
 const NEWS_DATE_TIME_NUMBER_FORMAT = 'dd.MM.yyyy HH:mm:ss';
@@ -825,7 +826,7 @@ function updateObjectEnrichment_(properties, request) {
     keys.forEach(function(key) {
       const column = mapping[key];
       if (cellContent_(row[column - 1], formulas[column - 1]) !== '') return;
-      sheet.getRange(rowNumber, column, 1, 1).setValues([[safeCell_(values[key])]]);
+      writeTextCell_(sheet, rowNumber, column, values[key]);
       updated.push(key);
     });
     if (
@@ -920,8 +921,7 @@ function syncCadastralQueue_(properties) {
               objectFormulas[index][mapping.objectColumn - 1]
             );
             if (current !== '') return;
-            objectsSheet.getRange(index + 2, mapping.objectColumn, 1, 1)
-              .setValues([[safeCell_(value)]]);
+            writeTextCell_(objectsSheet, index + 2, mapping.objectColumn, value);
             objectUpdated = true;
           });
           if (objectUpdated) counts.results_received += 1;
@@ -937,7 +937,7 @@ function syncCadastralQueue_(properties) {
         counts.formulas_prepared += 1;
       }
     });
-    appendRows_(queueSheet, rowsToAppend);
+    appendCadastralRows_(queueSheet, rowsToAppend);
     return Object.assign({ok: true}, counts);
   } finally {
     lock.releaseLock();
@@ -1025,6 +1025,10 @@ function updateCadastralResult_(properties, request) {
       }
       return {ok: true, status: 'stale'};
     }
+    // Set E:G to plain text before writing. Otherwise Sheets may parse values
+    // such as 34:34:010059 as a time and destroy significant leading zeroes.
+    sheet.getRange(entry.rowNumber, 5, 1, 3)
+      .setNumberFormat(CADASTRAL_TEXT_NUMBER_FORMAT);
     sheet.getRange(entry.rowNumber, 5, 1, 6)
       .setValues([result.map(safeCell_)]);
     return {ok: true, status: 'updated'};
@@ -1299,6 +1303,25 @@ function appendRows_(sheet, rows) {
   const firstRow = Math.max(2, sheet.getLastRow() + 1);
   sheet.getRange(firstRow, 1, rows.length, rows[0].length)
     .setValues(rows.map(function(row) { return row.map(safeCell_); }));
+}
+
+
+function appendCadastralRows_(sheet, rows) {
+  if (!rows.length) return;
+  const firstRow = Math.max(2, sheet.getLastRow() + 1);
+  // Pre-format empty result cells as text so every later cadastral value keeps
+  // its exact colon-separated representation.
+  sheet.getRange(firstRow, 5, rows.length, 3)
+    .setNumberFormat(CADASTRAL_TEXT_NUMBER_FORMAT);
+  sheet.getRange(firstRow, 1, rows.length, CADASTRAL_HEADERS.length)
+    .setValues(rows.map(function(row) { return row.map(safeCell_); }));
+}
+
+
+function writeTextCell_(sheet, rowNumber, column, value) {
+  const target = sheet.getRange(rowNumber, column, 1, 1);
+  target.setNumberFormat(CADASTRAL_TEXT_NUMBER_FORMAT);
+  target.setValues([[safeCell_(value)]]);
 }
 
 
