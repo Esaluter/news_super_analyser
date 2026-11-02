@@ -350,8 +350,11 @@ def _street(value: Any) -> str:
         r"\b(?:российская федерация|муниципальный округ|городской округ|"
         r"вн\s+тер\s+г|район|город|область|республика|край)\b"
     )
+    trailing_house = re.compile(
+        r"\s+\d+[а-яa-z]?(?:/\d+[а-яa-z]?)?$"
+    )
     for raw_segment in re.split(r"[,;]", str(value or "")):
-        segment = _normalized_text(raw_segment)
+        segment = trailing_house.sub("", _normalized_text(raw_segment)).strip()
         prefix = re.search(rf"\b{marker}\s+(.+)$", segment)
         if prefix:
             candidate = re.split(
@@ -366,7 +369,7 @@ def _street(value: Any) -> str:
             candidate = suffix.group(1).strip()
             if candidate and not administrative.search(candidate):
                 return candidate
-    text = _normalized_text(value)
+    text = trailing_house.sub("", _normalized_text(value)).strip()
     match = re.search(
         rf"\b{marker}\s+(.+?)(?=\s+(?:д|дом|стр|строение|корп|корпус)\b|$)",
         text,

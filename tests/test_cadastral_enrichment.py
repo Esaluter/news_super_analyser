@@ -504,10 +504,47 @@ def test_nspd_long_moscow_address_extracts_explicit_street_not_territory():
 
 
 def test_street_type_after_name_and_common_abbreviations_are_supported():
-    assert _street("Москва, Профсоюзная улица, дом 123А") == "профсоюзная"
-    assert _street("Москва, пр-т Ленинский, дом 10") == "ленинский"
-    assert _street("Москва, пер. Сивцев Вражек, дом 4") == "сивцев вражек"
-    assert _street("Москва, б-р Яна Райниса, дом 2") == "яна райниса"
+    cases = {
+        "Шереметьевское шоссе 37": "шереметьевское",
+        "Ленинградское шоссе 5": "ленинградское",
+        "Варшавское шоссе 125": "варшавское",
+        "Садовая улица 12": "садовая",
+        "Ленинский проспект 10": "ленинский",
+        "Профсоюзная улица, дом 123А": "профсоюзная",
+        "Можайское шоссе, дом 10": "можайское",
+        "Переулок Сивцев Вражек, дом 4": "сивцев вражек",
+        "Москва, пр-т Ленинский, дом 10": "ленинский",
+        "Москва, б-р Яна Райниса, дом 2": "яна райниса",
+    }
+
+    for address, expected in cases.items():
+        assert _street(address) == expected
+
+
+def test_bare_trailing_house_is_not_duplicated_in_search_variants():
+    variants = build_search_variants(
+        region="Московская область",
+        locality="Химки",
+        address="Шереметьевское шоссе 37",
+    )
+
+    assert variants[1] == (2, "московская химки шереметьевское 37")
+    assert all("37 37" not in query for _, query in variants)
+
+
+def test_bare_house_source_street_matches_explicit_house_candidate():
+    assert candidate_rejection_reason(
+        {
+            "cadastral_number": "50:10:0000000:1",
+            "address": (
+                "Московская область, Химки, "
+                "Шереметьевское шоссе, дом 37"
+            ),
+        },
+        region="Московская область",
+        locality="Химки",
+        address="Шереметьевское шоссе 37",
+    ) is None
 
 
 def test_address_without_explicit_street_type_is_not_guessed():
